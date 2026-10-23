@@ -8,7 +8,8 @@ namespace LiveCaptionsTranslator
 {
     public partial class InfoPage : Page
     {
-        public const int MIN_HEIGHT = 210;
+        // Rows: an intro that wraps to a few lines, a separator, then one line per link.
+        public const int MIN_HEIGHT = 270;
 
         public InfoPage()
         {

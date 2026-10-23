@@ -1,4 +1,5 @@
-﻿using System.Diagnostics;
+﻿using System.Collections.ObjectModel;
+using System.Diagnostics;
 using System.Windows;
 using System.Windows.Controls;
 using Microsoft.Win32;
@@ -18,33 +19,90 @@ namespace LiveCaptionsTranslator
         private int currentPage = 1;
         private int searchPage = 1;
         private int maxPage = 1;
-        private int maxRowPerPage = 30;
+        private int maxRowPerPage = 10;
 
-        public string SearchText { get; set; } = string.Empty;
+        // The grid is bound once to this collection: a full page load replaces its contents, and a
+        // newly logged sentence is prepended without touching the rows already on screen.
+        private readonly ObservableCollection<TranslationHistoryEntry> historyItems = new();
+
+        // Guards against an older page load overwriting a newer one (clicking Next twice quickly).
+        private int loadGeneration;
+
+        // Coalesces the burst of log notifications that arrives while a sentence is being translated.
+        private long lastLiveRefreshTicks;
+
+        // Never null: the search handler assigns whatever the box reports, and the live-refresh path
+        // below reads Length on a background thread.
+        private string searchText = string.Empty;
+        public string SearchText
+        {
+            get => searchText;
+            set => searchText = value ?? string.Empty;
+        }
 
         public HistoryPage()
         {
             InitializeComponent();
-            ApplicationThemeManager.ApplySystemTheme();
+
+            // The application theme is already applied once at startup (MainWindow), so re-applying it
+            // per navigation only cost time: ~12 ms on the first visit for no visible change.
+            HistoryDataGrid.ItemsSource = historyItems;
 
             Loaded += async (s, e) =>
             {
+                // Resize before the data arrives. The page used to load first and grow the window
+                // afterwards, which read as "it is slow" even though the query itself is ~2 ms.
+                (App.Current.MainWindow as MainWindow)?.AutoHeightAdjust(
+                    minHeight: MIN_HEIGHT, maxHeight: MIN_HEIGHT);
+
                 await LoadHistory();
-                (App.Current.MainWindow as MainWindow)?.AutoHeightAdjust(minHeight: MIN_HEIGHT, maxHeight: MIN_HEIGHT);
+
+                // Loaded can fire again when navigating back to a cached page.
+                Translator.TranslationLogged -= OnTranslationLogged;
                 Translator.TranslationLogged += OnTranslationLogged;
             };
-            Unloaded += (s, e) =>
-            {
-                HistoryDataGrid.ItemsSource = null;
-                Translator.TranslationLogged -= OnTranslationLogged;
-            };
+            Unloaded += (s, e) => Translator.TranslationLogged -= OnTranslationLogged;
 
             HistoryMaxRow.SelectionChanged += maxRow_SelectionChanged;
         }
 
         private async void OnTranslationLogged()
         {
-            await LoadHistory();
+            // One notification per logged sentence. Rebuilding the page for each of them re-bound every
+            // row and jumped the scroll position back to the top, which is what made the page feel slow
+            // while a translation was running. Only the first row of page 1 can change, so prepend it.
+            if (searchText.Length != 0 || currentPage != 1)
+                return;
+
+            long now = Environment.TickCount64;
+            if (now - lastLiveRefreshTicks < 500)
+                return;
+            lastLiveRefreshTicks = now;
+
+            if (historyItems.Count == 0)
+            {
+                await LoadHistory();
+                return;
+            }
+
+            var last = await Task.Run(() => SQLiteHistoryLogger.LoadLastTranslation());
+            if (last == null)
+                return;
+
+            await Dispatcher.InvokeAsync(() =>
+            {
+                if (searchText.Length != 0 || currentPage != 1)
+                    return;
+
+                if (historyItems.Count > 0 &&
+                    historyItems[0].TimestampFull == last.TimestampFull &&
+                    historyItems[0].SourceText == last.SourceText)
+                    return;
+
+                historyItems.Insert(0, last);
+                while (historyItems.Count > maxRowPerPage)
+                    historyItems.RemoveAt(historyItems.Count - 1);
+            });
         }
 
         private async void PageDown_click(object sender, RoutedEventArgs e)
@@ -126,7 +184,9 @@ namespace LiveCaptionsTranslator
             {
                 try
                 {
-                    await SQLiteHistoryLogger.ExportToCSV(saveFileDialog.FileName);
+                    // The whole table is read for an export, so keep it off the dispatcher as well.
+                    string path = saveFileDialog.FileName;
+                    await Task.Run(() => SQLiteHistoryLogger.ExportToCSV(path));
                     SnackbarHost.Show("Saved Success.", $"File saved to: {saveFileDialog.FileName}", SnackbarType.Success);
                 }
                 catch (Exception ex)
@@ -174,14 +234,43 @@ namespace LiveCaptionsTranslator
 
         public async Task LoadHistory()
         {
-            var data = await SQLiteHistoryLogger.LoadHistoryAsync(currentPage, maxRowPerPage, SearchText);
-            List<TranslationHistoryEntry> history = data.Item1;
+            // Microsoft.Data.Sqlite's async methods run synchronously underneath, so awaiting the query
+            // directly ran the scan and the sort on the UI thread. Hand it to the thread pool instead;
+            // the connection is per-operation now, so this is safe.
+            int generation = ++loadGeneration;
+            int page = currentPage;
+            int rowPerPage = maxRowPerPage;
+            string searchText = SearchText;
+
+            var data = await Task.Run(() =>
+                SQLiteHistoryLogger.LoadHistoryAsync(page, rowPerPage, searchText));
 
             maxPage = (data.Item2 > 0) ? data.Item2 : 1;
 
             await Dispatcher.InvokeAsync(() =>
             {
-                HistoryDataGrid.ItemsSource = history;
+                if (generation != loadGeneration)
+                    return;
+
+                // Update the bound collection in place instead of Clear()+Add(). Clearing raises a Reset,
+                // which makes the DataGrid drop every row container and generate new ones; assigning by
+                // index raises a Replace, so each row keeps its DataGridRow, its cells and their
+                // TextBlocks and only its DataContext changes. The UI is reused, only the data is new.
+                var items = data.Item1;
+                int shared = Math.Min(items.Count, historyItems.Count);
+                for (int i = 0; i < shared; i++)
+                {
+                    if (!ReferenceEquals(historyItems[i], items[i]))
+                        historyItems[i] = items[i];
+                }
+
+                for (int i = shared; i < items.Count; i++)
+                    historyItems.Add(items[i]);
+
+                // A short last page (or a search with fewer hits) leaves stale rows at the tail.
+                while (historyItems.Count > items.Count)
+                    historyItems.RemoveAt(historyItems.Count - 1);
+
                 PageNumber.Text = currentPage.ToString() + "/" + maxPage.ToString();
             });
         }

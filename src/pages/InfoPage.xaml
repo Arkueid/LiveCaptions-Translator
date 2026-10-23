@@ -12,35 +12,55 @@
     <Grid Margin="10">
         <StackPanel>
             <TextBlock TextAlignment="Left" TextWrapping="Wrap">
-                <Run Text="We welcome any form of contribution! You can provide suggestions or report bugs via GitHub issues, or contribute code directly by submitting Pull Requests." />
-                <Run Text="&#x0A;If this program is helpful to you, please consider giving us a star ✨!" />
+                <Run FontWeight="SemiBold" Text="Fork of" />
+                <Hyperlink NavigateUri="https://github.com/SakiRinn/LiveCaptions-Translator" RequestNavigate="Hyperlink_RequestNavigate">
+                    <Run Text="SakiRinn/LiveCaptions-Translator" />
+                </Hyperlink>
+                <Run Text=":" />
+                <Run Text="&#x0A;This branch rewrites how captions are displayed — stable, never-rewinding subtitle text, one identity per sentence, and overlays that no longer print a sentence group twice." />
+                <Run Text="&#x0A;Contributions are welcome as Pull Requests on the fork's repository." />
             </TextBlock>
             <Separator Margin="0,5,0,5" />
             <TextBlock Margin="0,0,0,3">
                 <Run FontWeight="SemiBold" Text="Repository:" />
+                <Hyperlink NavigateUri="https://github.com/Arkueid/LiveCaptions-Translator" RequestNavigate="Hyperlink_RequestNavigate">
+                    <Run Text="https://github.com/Arkueid/LiveCaptions-Translator" />
+                </Hyperlink>
+            </TextBlock>
+            <TextBlock Margin="0,0,0,3">
+                <Run FontWeight="SemiBold" Text="Upstream:" />
                 <Hyperlink NavigateUri="https://github.com/SakiRinn/LiveCaptions-Translator" RequestNavigate="Hyperlink_RequestNavigate">
                     <Run Text="https://github.com/SakiRinn/LiveCaptions-Translator" />
                 </Hyperlink>
+                <Run Text="(original project)" />
             </TextBlock>
             <TextBlock Margin="0,0,0,3">
                 <Run FontWeight="SemiBold" Text="Wiki:" />
                 <Hyperlink NavigateUri="https://github.com/SakiRinn/LiveCaptions-Translator/wiki" RequestNavigate="Hyperlink_RequestNavigate">
                     <Run x:Name="Wiki" Text="https://github.com/SakiRinn/LiveCaptions-Translator/wiki" />
                 </Hyperlink>
+                <Run Text="(upstream)" />
             </TextBlock>
             <TextBlock Margin="0,0,0,3">
                 <Run FontWeight="SemiBold" Text="Maintainer:" />
+                <Hyperlink NavigateUri="https://github.com/Arkueid" RequestNavigate="Hyperlink_RequestNavigate">
+                    <Run Text="@Arkueid" />
+                </Hyperlink>
+                <Run Text="(this fork)" />
+            </TextBlock>
+            <TextBlock Margin="0,0,0,3">
+                <Run FontWeight="SemiBold" Text="Upstream authors:" />
                 <Hyperlink NavigateUri="https://github.com/SakiRinn" RequestNavigate="Hyperlink_RequestNavigate">
                     <Run Text="@SakiRinn" />
                 </Hyperlink>
-                <Run Text="(Author) and" />
+                <Run Text="and" />
                 <Hyperlink NavigateUri="https://github.com/A-nony-mous" RequestNavigate="Hyperlink_RequestNavigate">
                     <Run Text="@A-nony-mous" />
                 </Hyperlink>
             </TextBlock>
             <TextBlock>
                 <Run FontWeight="SemiBold" Text="Version:" />
-                <Hyperlink NavigateUri="https://github.com/SakiRinn/LiveCaptions-Translator/releases" RequestNavigate="Hyperlink_RequestNavigate">
+                <Hyperlink NavigateUri="https://github.com/Arkueid/LiveCaptions-Translator/commits/master" RequestNavigate="Hyperlink_RequestNavigate">
                     <Run x:Name="Version" Text="1.1.1.1" />
                 </Hyperlink>
             </TextBlock>

@@ -12,17 +12,31 @@ namespace LiveCaptionsTranslator.utils
     {
         public static readonly string CONNECTION_STRING = "Data Source=translation_history.db;";
 
-        private static SqliteConnection _sharedConnection;
-        private static readonly object _connectionLock = new object();
-
         static SQLiteHistoryLogger()
         {
             InitializeDatabase();
         }
 
+        // One connection per operation. The logger writes from a background thread while the history
+        // page reads from another, and a single SqliteConnection must not be used by two threads at
+        // once. Opening is cheap; WAL (enabled below) lets a reader run while a write is in flight.
+        private static SqliteConnection OpenConnection()
+        {
+            var connection = new SqliteConnection(CONNECTION_STRING);
+            connection.Open();
+            return connection;
+        }
+
         private static void InitializeDatabase()
         {
-            GetConnection();
+            using var connection = OpenConnection();
+
+            // WAL keeps the history page readable while a translation is being appended, instead of
+            // the two competing for the same lock.
+            using (var command = new SqliteCommand("PRAGMA journal_mode=WAL;", connection))
+                command.ExecuteScalar();
+            using (var command = new SqliteCommand("PRAGMA synchronous=NORMAL;", connection))
+                command.ExecuteNonQuery();
 
             using (var command = new SqliteCommand(@"
                 CREATE TABLE IF NOT EXISTS TranslationHistory (
@@ -32,36 +46,9 @@ namespace LiveCaptionsTranslator.utils
                     TranslatedText TEXT,
                     TargetLanguage TEXT,
                     ApiUsed TEXT
-                );", GetConnection()))
+                );", connection))
             {
                 command.ExecuteNonQuery();
-            }
-        }
-
-        private static SqliteConnection GetConnection()
-        {
-            lock (_connectionLock)
-            {
-                if (_sharedConnection == null)
-                {
-                    _sharedConnection = new SqliteConnection(CONNECTION_STRING);
-                    _sharedConnection.Open();
-                }
-                else if (_sharedConnection.State != System.Data.ConnectionState.Open)
-                {
-                    try
-                    {
-                        _sharedConnection.Open();
-                    }
-                    catch
-                    {
-                        _sharedConnection.Dispose();
-                        _sharedConnection = new SqliteConnection(CONNECTION_STRING);
-                        _sharedConnection.Open();
-                    }
-                }
-
-                return _sharedConnection;
             }
         }
 
@@ -72,27 +59,27 @@ namespace LiveCaptionsTranslator.utils
                 INSERT INTO TranslationHistory (Timestamp, SourceText, TranslatedText, TargetLanguage, ApiUsed)
                 VALUES (@Timestamp, @SourceText, @TranslatedText, @TargetLanguage, @ApiUsed)";
 
-            using (var command = new SqliteCommand(insertQuery, GetConnection()))
-            {
-                command.Parameters.AddWithValue("@Timestamp", DateTimeOffset.UtcNow.ToUnixTimeSeconds());
-                command.Parameters.AddWithValue("@SourceText", sourceText);
-                command.Parameters.AddWithValue("@TranslatedText", translatedText);
-                command.Parameters.AddWithValue("@TargetLanguage", targetLanguage);
-                command.Parameters.AddWithValue("@ApiUsed", apiUsed);
-                await command.ExecuteNonQueryAsync(token);
-            }
+            using var connection = OpenConnection();
+            using var command = new SqliteCommand(insertQuery, connection);
+            command.Parameters.AddWithValue("@Timestamp", DateTimeOffset.UtcNow.ToUnixTimeSeconds());
+            command.Parameters.AddWithValue("@SourceText", sourceText);
+            command.Parameters.AddWithValue("@TranslatedText", translatedText);
+            command.Parameters.AddWithValue("@TargetLanguage", targetLanguage);
+            command.Parameters.AddWithValue("@ApiUsed", apiUsed);
+            await command.ExecuteNonQueryAsync(token);
         }
 
         public static async Task<(List<TranslationHistoryEntry>, int)> LoadHistoryAsync(
             int page, int maxRow, string searchText, CancellationToken token = default)
         {
-            var history = new List<TranslationHistoryEntry>();
+            var history = new List<TranslationHistoryEntry>(Math.Max(1, maxRow));
             int totalCount = 0;
+            using var connection = OpenConnection();
+
             using (var command = new SqliteCommand(@"
                 SELECT COUNT(*) 
                 FROM TranslationHistory
-                WHERE SourceText LIKE @search OR TranslatedText LIKE @search", GetConnection()))
-
+                WHERE SourceText LIKE @search OR TranslatedText LIKE @search", connection))
             {
                 command.Parameters.AddWithValue("@search", $"%{searchText}%");
                 totalCount = Convert.ToInt32(await command.ExecuteScalarAsync(token));
@@ -102,12 +89,15 @@ namespace LiveCaptionsTranslator.utils
             int maxPage = Math.Max(1, (int)Math.Ceiling(totalCount / (double)maxRow));
             int offset = Math.Max(0, (page - 1) * maxRow);
 
+            // Newest first, by `Id` — not by `Timestamp`: the timestamp is whole seconds, so several
+            // rows written in the same second tie, and a tie makes both the order within a page and
+            // the LIMIT/OFFSET window unstable (rows could repeat or be skipped while paging).
             using (var command = new SqliteCommand(@"
                 SELECT Timestamp, SourceText, TranslatedText, TargetLanguage, ApiUsed
                 FROM TranslationHistory
                 WHERE SourceText LIKE @search OR TranslatedText LIKE @search
-                ORDER BY Timestamp DESC
-                LIMIT @maxRow OFFSET @offset", GetConnection()))
+                ORDER BY Id DESC
+                LIMIT @maxRow OFFSET @offset", connection))
 
             {
                 command.Parameters.AddWithValue("@search", $"%{searchText}%");
@@ -148,7 +138,8 @@ namespace LiveCaptionsTranslator.utils
         public static async Task ClearHistory(CancellationToken token = default)
         {
             string selectQuery = "DELETE FROM TranslationHistory; DELETE FROM sqlite_sequence WHERE NAME='TranslationHistory'";
-            using (var command = new SqliteCommand(selectQuery, GetConnection()))
+            using var connection = OpenConnection();
+            using (var command = new SqliteCommand(selectQuery, connection))
             {
                 await command.ExecuteNonQueryAsync(token);
             }
@@ -162,7 +153,8 @@ namespace LiveCaptionsTranslator.utils
                 ORDER BY Id DESC
                 LIMIT 1";
 
-            using (var command = new SqliteCommand(selectQuery, GetConnection()))
+            using var connection = OpenConnection();
+            using (var command = new SqliteCommand(selectQuery, connection))
             using (var reader = await command.ExecuteReaderAsync(token))
             {
                 if (await reader.ReadAsync(token))
@@ -180,7 +172,8 @@ namespace LiveCaptionsTranslator.utils
                 ORDER BY Id DESC
                 LIMIT 1";
 
-            using (var command = new SqliteCommand(selectQuery, GetConnection()))
+            using var connection = OpenConnection();
+            using (var command = new SqliteCommand(selectQuery, connection))
             using (var reader = await command.ExecuteReaderAsync(token))
             {
                 if (await reader.ReadAsync(token))
@@ -203,10 +196,11 @@ namespace LiveCaptionsTranslator.utils
 
         public static async Task DeleteLastTranslation(CancellationToken token = default)
         {
+            using var connection = OpenConnection();
             using (var command = new SqliteCommand(@"
                 DELETE FROM TranslationHistory
                 WHERE Id IN (SELECT Id FROM TranslationHistory ORDER BY Id DESC LIMIT 1)",
-                GetConnection()))
+                connection))
             {
                 await command.ExecuteNonQueryAsync(token);
             }
@@ -219,9 +213,10 @@ namespace LiveCaptionsTranslator.utils
             string selectQuery = @"
                 SELECT Timestamp, SourceText, TranslatedText, TargetLanguage, ApiUsed
                 FROM TranslationHistory
-                ORDER BY Timestamp DESC";
+                ORDER BY Id DESC";
 
-            using (var command = new SqliteCommand(selectQuery, GetConnection()))
+            using var connection = OpenConnection();
+            using (var command = new SqliteCommand(selectQuery, connection))
             using (var reader = await command.ExecuteReaderAsync(token))
             {
                 while (await reader.ReadAsync(token))
@@ -249,7 +244,8 @@ namespace LiveCaptionsTranslator.utils
         private static async Task MigrateOldTimestampFormat()
         {
             var records = new List<(long id, string timestamp)>();
-            using (var command = new SqliteCommand("SELECT Id, Timestamp FROM TranslationHistory", GetConnection()))
+            using var connection = OpenConnection();
+            using (var command = new SqliteCommand("SELECT Id, Timestamp FROM TranslationHistory", connection))
             using (var reader = await command.ExecuteReaderAsync())
             {
                 while (await reader.ReadAsync())
@@ -267,7 +263,7 @@ namespace LiveCaptionsTranslator.utils
                     long unixTime = ((DateTimeOffset)dt).ToUnixTimeSeconds();
                     using var updateCommand = new SqliteCommand(
                         "UPDATE TranslationHistory SET Timestamp = @Timestamp WHERE Id = @Id",
-                        GetConnection());
+                        connection);
                     updateCommand.Parameters.AddWithValue("@Id", id);
                     updateCommand.Parameters.AddWithValue("@Timestamp", unixTime.ToString());
                     await updateCommand.ExecuteNonQueryAsync();

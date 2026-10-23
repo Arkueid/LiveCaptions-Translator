@@ -23,10 +23,13 @@ namespace LiveCaptionsTranslator
             Loaded += (s, e) =>
             {
                 SystemThemeWatcher.Watch(this, WindowBackdropType.Mica, true);
-                RootNavigation.Navigate(typeof(CaptionPage));
+                RootNavigation.Navigate(typeof(SettingPage));
                 IsAutoHeight = true;
                 CheckForFirstUse();
                 CheckForUpdates();
+
+                // Captions only exist in the overlay now, so it opens with the app.
+                Dispatcher.InvokeAsync(ShowOverlay, System.Windows.Threading.DispatcherPriority.Background);
             };
 
             double screenWidth = SystemParameters.PrimaryScreenWidth;
@@ -37,13 +40,12 @@ namespace LiveCaptionsTranslator
                 windowState.Top <= 0 || windowState.Top >= screenHeight)
             {
                 WindowHandler.RestoreState(this, new Rect(
-                    (screenWidth - 775) / 2, screenHeight * 3 / 4 - 167, 775, 167));
+                    (screenWidth - 775) / 2, screenHeight * 3 / 4 - 200, 775, 400));
             }
             else
                 WindowHandler.RestoreState(this, windowState);
 
             ToggleTopmost(Translator.Setting.MainWindow.Topmost);
-            ShowLogCard(Translator.Setting.MainWindow.CaptionLogEnabled);
         }
 
         private void TopmostButton_Click(object sender, RoutedEventArgs e)
@@ -57,31 +59,7 @@ namespace LiveCaptionsTranslator
             var symbolIcon = button?.Icon as SymbolIcon;
 
             if (OverlayWindow == null)
-            {
-                symbolIcon.Symbol = SymbolRegular.ClosedCaption24;
-                symbolIcon.Filled = true;
-
-                OverlayWindow = new OverlayWindow();
-                OverlayWindow.SizeChanged +=
-                    (s, e) => WindowHandler.SaveState(OverlayWindow, Translator.Setting);
-                OverlayWindow.LocationChanged +=
-                    (s, e) => WindowHandler.SaveState(OverlayWindow, Translator.Setting);
-
-                double screenWidth = SystemParameters.PrimaryScreenWidth;
-                double screenHeight = SystemParameters.PrimaryScreenHeight;
-
-                var windowState = WindowHandler.LoadState(OverlayWindow, Translator.Setting);
-                if (windowState.Left <= 0 || windowState.Left >= screenWidth ||
-                    windowState.Top <= 0 || windowState.Top >= screenHeight)
-                {
-                    WindowHandler.RestoreState(OverlayWindow, new Rect(
-                        (screenWidth - 650) / 2, screenHeight * 5 / 6 - 135, 650, 135));
-                }
-                else
-                    WindowHandler.RestoreState(OverlayWindow, windowState);
-
-                OverlayWindow.Show();
-            }
+                ShowOverlay();
             else
             {
                 symbolIcon.Symbol = SymbolRegular.ClosedCaptionOff24;
@@ -103,30 +81,40 @@ namespace LiveCaptionsTranslator
             }
         }
 
-        private void LogOnlyButton_Click(object sender, RoutedEventArgs e)
+        // The overlay is the only place captions are rendered now, so it is opened together with
+        // the main window: launching the app and seeing nothing would look broken.
+        private void ShowOverlay()
         {
-            var button = sender as Button;
-            var symbolIcon = button?.Icon as SymbolIcon;
+            if (OverlayWindow != null)
+                return;
 
-            if (Translator.LogOnlyFlag)
+            if (OverlayModeButton.Icon is SymbolIcon icon)
             {
-                Translator.LogOnlyFlag = false;
-                symbolIcon.Filled = false;
+                icon.Symbol = SymbolRegular.ClosedCaption24;
+                icon.Filled = true;
+            }
+
+            OverlayWindow = new OverlayWindow();
+            OverlayWindow.SizeChanged +=
+                (s, e) => WindowHandler.SaveState(OverlayWindow, Translator.Setting);
+            OverlayWindow.LocationChanged +=
+                (s, e) => WindowHandler.SaveState(OverlayWindow, Translator.Setting);
+            OverlayWindow.Closed += (s, e) => OverlayWindow = null;
+
+            double screenWidth = SystemParameters.PrimaryScreenWidth;
+            double screenHeight = SystemParameters.PrimaryScreenHeight;
+
+            var windowState = WindowHandler.LoadState(OverlayWindow, Translator.Setting);
+            if (windowState.Left <= 0 || windowState.Left >= screenWidth ||
+                windowState.Top <= 0 || windowState.Top >= screenHeight)
+            {
+                WindowHandler.RestoreState(OverlayWindow, new Rect(
+                    (screenWidth - 650) / 2, screenHeight * 5 / 6 - 135, 650, 135));
             }
             else
-            {
-                Translator.LogOnlyFlag = true;
-                symbolIcon.Filled = true;
-            }
+                WindowHandler.RestoreState(OverlayWindow, windowState);
 
-            Translator.ClearContexts();
-        }
-
-        private void CaptionLogButton_Click(object sender, RoutedEventArgs e)
-        {
-            Translator.Setting.MainWindow.CaptionLogEnabled = !Translator.Setting.MainWindow.CaptionLogEnabled;
-            ShowLogCard(Translator.Setting.MainWindow.CaptionLogEnabled);
-            CaptionPage.Instance?.AutoHeight();
+            OverlayWindow.Show();
         }
 
         private void MainWindow_LocationChanged(object sender, EventArgs e)
@@ -222,18 +210,6 @@ namespace LiveCaptionsTranslator
                 }
                 else
                     Translator.Setting.IgnoredUpdateVersion = latestVersion;
-            }
-        }
-
-        public void ShowLogCard(bool enabled)
-        {
-            if (CaptionLogButton.Icon is SymbolIcon icon)
-            {
-                if (enabled)
-                    icon.Symbol = SymbolRegular.History24;
-                else
-                    icon.Symbol = SymbolRegular.HistoryDismiss24;
-                CaptionPage.Instance?.CollapseTranslatedCaption(enabled);
             }
         }
 

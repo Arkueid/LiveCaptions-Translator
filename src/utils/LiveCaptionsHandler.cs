@@ -11,6 +11,17 @@ namespace LiveCaptionsTranslator.utils
 
         private static AutomationElement? captionsTextBlock = null;
 
+        // UI Automation event subscription. LiveCaptions raises a Name property-changed event
+        // whenever the caption text updates, which lets callers react to a change instead of
+        // polling the automation tree every 50 ms.
+        private static AutomationElement? subscribedTextBlock = null;
+        private static AutomationPropertyChangedEventHandler? nameChangedHandler = null;
+
+        public static bool IsCaptionChangeSubscribed =>
+            subscribedTextBlock != null &&
+            captionsTextBlock != null &&
+            ReferenceEquals(subscribedTextBlock, captionsTextBlock);
+
         public static AutomationElement LaunchLiveCaptions()
         {
             // Init
@@ -24,8 +35,10 @@ namespace LiveCaptionsTranslator.utils
                  attemptCount++)
             {
                 window = FindWindowByPId(process.Id);
-                if (attemptCount > 10000)
+                if (attemptCount > 200)
                     throw new Exception("Failed to launch LiveCaptions!");
+                // Avoid spinning the CPU while the window is being created.
+                Thread.Sleep(50);
             }
 
             return window;
@@ -91,9 +104,95 @@ namespace LiveCaptionsTranslator.utils
             }
             catch (ElementNotAvailableException)
             {
-                captionsTextBlock = null;
+                ResetCaptionSubscription();
                 throw;
             }
+        }
+
+        /// <summary>
+        /// Subscribes to caption text changes through UI Automation events.
+        /// Returns false when the caption element is not available yet or the provider
+        /// does not support property-changed events; the caller should then keep polling.
+        /// </summary>
+        public static bool TrySubscribeCaptionChanges(AutomationElement? window, Action onCaptionChanged)
+        {
+            if (window == null || onCaptionChanged == null)
+                return false;
+
+            if (captionsTextBlock == null)
+            {
+                try
+                {
+                    captionsTextBlock = FindElementByAId(window, "CaptionsTextBlock");
+                }
+                catch (Exception ex)
+                {
+                    Debug.WriteLine($"[LiveCaptionsHandler] Caption element lookup failed: {ex.Message}");
+                    captionsTextBlock = null;
+                }
+            }
+
+            if (captionsTextBlock == null)
+                return false;
+
+            // Already listening on the element this method resolved — nothing to do.
+            if (IsCaptionChangeSubscribed)
+                return true;
+
+            UnsubscribeCaptionChanges();
+
+            try
+            {
+                var handler = new AutomationPropertyChangedEventHandler((sender, e) =>
+                {
+                    if (e.Property == AutomationElement.NameProperty)
+                        onCaptionChanged();
+                });
+
+                Automation.AddAutomationPropertyChangedEventHandler(
+                    captionsTextBlock, TreeScope.Element, handler, AutomationElement.NameProperty);
+
+                nameChangedHandler = handler;
+                subscribedTextBlock = captionsTextBlock;
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine($"[LiveCaptionsHandler] Caption event subscribe failed: {ex.Message}");
+                nameChangedHandler = null;
+                subscribedTextBlock = null;
+                return false;
+            }
+        }
+
+        public static void UnsubscribeCaptionChanges()
+        {
+            var element = subscribedTextBlock;
+            var handler = nameChangedHandler;
+            nameChangedHandler = null;
+            subscribedTextBlock = null;
+
+            if (element == null || handler == null)
+                return;
+
+            try
+            {
+                Automation.RemoveAutomationPropertyChangedEventHandler(element, handler);
+            }
+            catch (Exception ex)
+            {
+                // The process may be gone already; there is nothing left to detach from.
+                Debug.WriteLine($"[LiveCaptionsHandler] Caption event unsubscribe failed: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// Drops the cached element and the subscription. Call after LiveCaptions restarts.
+        /// </summary>
+        public static void ResetCaptionSubscription()
+        {
+            UnsubscribeCaptionChanges();
+            captionsTextBlock = null;
         }
 
         private static AutomationElement FindWindowByPId(int processId)

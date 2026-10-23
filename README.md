@@ -18,6 +18,12 @@
 
 </div>
 
+> 🍴 **This repository is a fork of [SakiRinn/LiveCaptions-Translator](https://github.com/SakiRinn/LiveCaptions-Translator).**
+>
+> Installation, Windows LiveCaptions setup and API configuration are unchanged and still documented [upstream](https://github.com/SakiRinn/LiveCaptions-Translator/wiki).
+> What this branch changes is **how captions are displayed** — see [Changes in this Fork](#changes-in-this-fork).
+> Pre-built binaries are published **upstream only**; this fork is built from source (see [Building from Source](#building-from-source)).
+
 ## Overview
 
 **✨ LiveCaptions Translator = Windows LiveCaptions + Translate API ✨**
@@ -26,7 +32,7 @@ This is a lightweight tool that seamlessly integrates translation APIs with Wind
 
 Windows' built-in LiveCaptions is easy to use, uses few resources, and has extremely high recognition accuracy. If empowering it with the awesome translation capabilities of LLMs, you will get... possibly the best real-time translator available to date!
 
-**🚀 Quick Start:** Download from [Releases](https://github.com/SakiRinn/LiveCaptions-Translator/releases) and start with a single click!
+**🚀 Quick Start:** Grab a build from the [upstream releases](https://github.com/SakiRinn/LiveCaptions-Translator/releases) if you only want the original feature set — the overlay work described below lives in this fork, so build it from source ([instructions](#building-from-source)).
 
 <div align="center">
   <img src="images/preview.png" alt="Preview of LiveCaptions Translator" width="90%" />
@@ -85,7 +91,7 @@ Windows' built-in LiveCaptions is easy to use, uses few resources, and has extre
 
 - **🪟 Overlay Window**
 
-  Open a borderless, transparent overlay window to display subtitles, providing the most immersive experience. This is very useful for scenarios like gaming, videos, and live streams!
+  The overlay is the only place captions are drawn: the main window is settings and history only, and the overlay opens with the app. Borderless and transparent, it provides the most immersive experience — very useful for gaming, videos, and live streams!
 
   You can even make it completely embedded into the screen, becoming part of it. This means it won't affect any of your operations at all! This is perfect for gamers.
 
@@ -96,13 +102,23 @@ Windows' built-in LiveCaptions is easy to use, uses few resources, and has extre
     <br>
   </div>
 
-  You can open the Overlay Window on the taskbar and adjust its parameters such as the window background and subtitle color, font size, and transparency. Extremely high configurability allows it to completely match your preferences!
+  Hovering the overlay reveals a small toolbar that controls it in place: pause/resume, font size, bold, outline, text and background colors, background opacity, what to show (both / translation only / source only), line order, and click-through. It fades away as soon as the pointer leaves, so it never covers the text unless it is wanted.
 
   You can adjust the number of sentences displayed simultaneously in the *Overlay Sentences* section of the setting page.
 
+- **🧷 Captions That Do Not Rewind**
+
+  Windows LiveCaptions keeps rewriting the sentence it is still hearing — words appear, get rephrased, and shift around. Instead of painting that raw stream, the text is committed in stable chunks: what you have already read never disappears or moves, and only the still-changing tail waits (about 0.2 s of silence) before it is shown.
+
+  Every finished sentence also gets its own identity, so a translation is always attached to the sentence it belongs to. That is what removed the duplicated and skipped sentence groups of the old display.
+
+- **⏱️ Latency Readout**
+
+  With *Show Latency* enabled, each translation is prefixed with how long it took, plus the model-side prefill and decode split (e.g. `1420 ms (380+1040)`), which makes it obvious whether an API or a local model is the bottleneck.
+
 - **⚙️ Flexible Controls**
 
-  Supports Always-on-top window and convenient translation pause/resume, and you can copy text with a single click for quick share or saving.
+  Always-on-top window, and pause/resume right on the overlay's own toolbar — pausing stops API calls and clears the screen, so nothing stale is left behind.
 
 - **📒 History Management**
 
@@ -117,19 +133,28 @@ Windows' built-in LiveCaptions is easy to use, uses few resources, and has extre
     <br>
   </div>
 
-- **🎞️ Log Cards**
+## Changes in this Fork
 
-  Recent transcription records can be displayed as Log Cards, which helps you better grasp the context.
+The recognised-text pipeline was rebuilt. The list below is what that means in use:
 
-  You can enable it on the taskbar of the main page and change the number of cards in the *Log Cards* section of the setting page.
+- **Monotonic subtitle text.** A transcript buffer (`TranscriptStabilizer`) commits a prefix and only ever appends to it; the tail is held back for a few characters and flushed after ~0.2 s of silence. Text that has already been painted is never deleted and re-printed, which was the "letters disappear and come back" flicker.
+- **One identity per sentence.** A timeline assigns every finished sentence a sequence number; a translation is looked up by that number instead of by fuzzy string matching. Duplicate and swallowed sentence groups came from that guessing.
+- **Finished sentences go first.** Only one request is in flight at a time (local models degrade badly with parallel requests). When a sentence finishes, a speculative translation of the still-growing sentence is cancelled so the GPU starts on text the reader will keep.
+- **Single snapshot, single paint.** The overlay draws one immutable snapshot per update instead of a handful of properties written from different threads — every intermediate state used to be a picture it could paint.
+- **Overlay owns its controls.** Pause, typography, colors, opacity, show mode, order and click-through all live in a translucent toolbar that fades in on hover; `Ctrl+Alt+T` restores input after click-through is enabled.
+- **Ollama fixes.** Requests send `temperature` and `num_predict` instead of the ignored `max_tokens`, and thinking is disabled for Qwen 3.5 (it was burning the whole output budget on reasoning).
 
-  <div align="center">
-    <img src="images/log_cards.png" alt="Log cards" width="90%" />
-    <br>
-    <em style="font-size:80%">Log Cards</em>
-    <br>
-  </div>
+## Building from Source
 
+This fork does not publish binaries, so build it:
+
+```bash
+git clone https://github.com/Arkueid/LiveCaptions-Translator.git
+cd LiveCaptions-Translator
+dotnet build -c Release
+```
+
+The output lands in `bin/Release/net8.0-windows/` — start `LiveCaptionsTranslator.exe` from there. Building needs the [.NET 8 SDK](https://dotnet.microsoft.com/download/dotnet/8.0); the runtime mentioned below is enough to *run* a build, not to make one.
 
 ## Prerequisites
 

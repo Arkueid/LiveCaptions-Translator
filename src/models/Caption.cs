@@ -13,72 +13,33 @@ namespace LiveCaptionsTranslator.models
         private static Caption? instance = null;
         public event PropertyChangedEventHandler? PropertyChanged;
 
-        private string displayOriginalCaption = string.Empty;
-        private string displayTranslatedCaption = string.Empty;
-        private string overlayOriginalCaption = " ";
-        private string overlayCurrentTranslation = " ";
-        private string overlayNoticePrefix = " ";
-
-        public string OriginalCaption { get; set; } = string.Empty;
-        public string TranslatedCaption { get; set; } = string.Empty;
-
         public Queue<TranslationHistoryEntry> Contexts { get; } = new(MAX_CONTEXTS);
 
-        public IEnumerable<TranslationHistoryEntry> AwareContexts => GetPreviousContexts(Translator.Setting.NumContexts);
-        public string AwareContextsCaption => GetPreviousText(Translator.Setting.NumContexts, TextType.Caption);
+        private CaptionSnapshot snapshot = CaptionSnapshot.Empty;
 
-        public IEnumerable<TranslationHistoryEntry> DisplayLogCards =>
-            GetPreviousContexts(Translator.Setting.DisplaySentences).Reverse();
-
-        public string DisplayOriginalCaption
+        /// <summary>
+        /// Everything the overlay draws, as one immutable object. The display used to be assembled
+        /// from half a dozen properties (live source, live translation, the source that translation
+        /// belonged to, the notice prefix, the list of finished pairs) that were written one after
+        /// another from different threads — every intermediate state was a picture the overlay could
+        /// paint, which is how sentence groups ended up duplicated, reordered or missing.
+        /// </summary>
+        public CaptionSnapshot Snapshot
         {
-            get => displayOriginalCaption;
-            set
+            get => snapshot;
+            private set
             {
-                displayOriginalCaption = value;
-                OnPropertyChanged("DisplayOriginalCaption");
-            }
-        }
-        public string DisplayTranslatedCaption
-        {
-            get => displayTranslatedCaption;
-            set
-            {
-                displayTranslatedCaption = value;
-                OnPropertyChanged("DisplayTranslatedCaption");
+                snapshot = value;
+                OnPropertyChanged(nameof(Snapshot));
             }
         }
 
-        public string OverlayOriginalCaption
+        public void Publish(CaptionSnapshot next)
         {
-            get => overlayOriginalCaption;
-            set
-            {
-                overlayOriginalCaption = value;
-                OnPropertyChanged("OverlayOriginalCaption");
-            }
+            if (next.HasSameContent(snapshot))
+                return;
+            Snapshot = next;
         }
-        public string OverlayNoticePrefix
-        {
-            get => overlayNoticePrefix;
-            set
-            {
-                overlayNoticePrefix = value;
-                OnPropertyChanged("OverlayNoticePrefix");
-            }
-        }
-        public string OverlayCurrentTranslation
-        {
-            get => overlayCurrentTranslation;
-            set
-            {
-                overlayCurrentTranslation = value;
-                OnPropertyChanged("OverlayCurrentTranslation");
-            }
-        }
-
-        public string OverlayPreviousTranslation =>
-            GetPreviousText(Translator.Setting.DisplaySentences, TextType.Translation);
 
         private Caption()
         {
@@ -91,6 +52,9 @@ namespace LiveCaptionsTranslator.models
             instance = new Caption();
             return instance;
         }
+
+        public IEnumerable<TranslationHistoryEntry> AwareContexts => GetPreviousContexts(Translator.Setting.NumContexts);
+        public string AwareContextsCaption => GetPreviousText(Translator.Setting.NumContexts, TextType.Caption);
 
         public string GetPreviousText(int count, TextType textType)
         {
@@ -130,10 +94,12 @@ namespace LiveCaptionsTranslator.models
                 return [];
 
             return Contexts
-                .Reverse().Take(count).Reverse()
+                .Reverse()
                 .Where(entry => entry != null && string.CompareOrdinal(entry.TranslatedText, "N/A") != 0 &&
                                 !entry.TranslatedText.Contains("[ERROR]") &&
-                                !entry.TranslatedText.Contains("[WARNING]"));
+                                !entry.TranslatedText.Contains("[WARNING]"))
+                .Take(count)
+                .Reverse();
         }
 
         public void OnPropertyChanged([CallerMemberName] string propName = "")

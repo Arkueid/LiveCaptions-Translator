@@ -35,7 +35,7 @@ namespace LiveCaptionsTranslator.models
         public void OnPropertyChanged([CallerMemberName] string propName = "")
         {
             PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(propName));
-            Translator.Setting?.Save();
+            Translator.Setting?.SaveDebounced();
         }
     }
 
@@ -48,7 +48,10 @@ namespace LiveCaptionsTranslator.models
         }
 
         private string modelName = "";
-        private double temperature = 1.0;
+        // Translation has one right answer per sentence, so a creative temperature only buys drift:
+        // at 1.0 a 4B local model rewrites the same partial sentence differently every few hundred
+        // milliseconds. 0.3 keeps the wording stable without making the output stilted.
+        private double temperature = 0.3;
 
         public string ModelName
         {
@@ -79,7 +82,9 @@ namespace LiveCaptionsTranslator.models
             public Message message { get; set; }
             public bool done { get; set; }
             public long total_duration { get; set; }
-            public int load_duration { get; set; }
+            // Nanoseconds, like every other duration Ollama reports: a model that has to be loaded
+            // from disk takes whole seconds, which does not fit in an int.
+            public long load_duration { get; set; }
             public int prompt_eval_count { get; set; }
             public long prompt_eval_duration { get; set; }
             public int eval_count { get; set; }

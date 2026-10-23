@@ -1,6 +1,6 @@
 ﻿using System.Diagnostics;
+using System.Globalization;
 using System.IO;
-using System.Text;
 using System.Windows.Automation;
 
 using LiveCaptionsTranslator.apis;
@@ -11,23 +11,107 @@ namespace LiveCaptionsTranslator
 {
     public static class Translator
     {
+        // Caption updates are pushed by UI Automation property-changed events. The loop below only
+        // wakes up on a real change, on a slow reconciliation poll (providers may drop events), or to
+        // run the timed triggers — no cross-process UIA read happens while the text is static.
+        private const int WAIT_SLICE_MS = 200;
+        // Probe often until events are proven to work, then reconcile rarely.
+        private const int RECONCILE_PROBE_MS = 400;
+        private const int RECONCILE_POLL_MS = 2500;
+        private const int SUBSCRIBE_RETRY_MS = 10000;
+        private const int RECONNECT_DELAY_MS = 2000;
+        // Fallback cadence: the previous polling loop, kept for providers without usable events.
+        private const int FALLBACK_ACTIVE_POLL_MS = 50;
+        private const int FALLBACK_IDLE_POLL_MS = 150;
+        private const int MAX_MISSED_EVENTS = 3;
+
         private static AutomationElement? window = null;
         private static Caption? caption = null;
         private static Setting? setting = null;
 
-        private static readonly Queue<string> pendingTextQueue = new();
-        private static readonly TranslationTaskQueue translationTaskQueue = new();
+        // The display pipeline, in order:
+        //   LiveCaptions buffer -> TranscriptStabilizer -> CaptionTimeline -> CaptionSnapshot
+        // The stabilizer decides which text may no longer change, the timeline gives every finished
+        // sentence an identity and the snapshot is the single object the overlay paints.
+        private static readonly TranscriptStabilizer stabilizer = new();
+        private static readonly CaptionTimeline timeline = new();
+
+        // Only one request is ever in flight: local models degrade badly when requests pile up, and
+        // a live caption only cares about the freshest result. Because the loop is sequential, the
+        // order in which results are applied (and written to the history) is the sentence order.
+        private static CancellationTokenSource? inFlight;
+
+        // A partial request is speculation: it describes a sentence that is still growing and may
+        // be replaced a moment later. When a finished sentence appears, that speculation is
+        // cancelled so the GPU starts on the text a reader will actually keep. Only the in-flight
+        // flag is read from the caption thread, which is why it is separate from `inFlight`.
+        private static volatile bool inFlightIsPartial;
+
+        // Which row the history ends with, so a partial translation of the *same* sentence replaces
+        // its own row instead of piling up.
+        private static int lastLoggedSeq;
+        private static bool lastLoggedWasPartial;
+
+        // Signalled by the UI Automation event handler whenever LiveCaptions updates its caption text.
+        private static readonly AutoResetEvent captionChangedSignal = new(false);
+        private static long nextSubscribeAttemptTicks = 0;
 
         public static AutomationElement? Window
         {
             get => window;
-            set => window = value;
+            set
+            {
+                window = value;
+                // A new window means the old automation element (and its event handler) is gone.
+                if (value == null)
+                {
+                    LiveCaptionsHandler.ResetCaptionSubscription();
+                    // The next captions belong to a new LiveCaptions session; the previous
+                    // transcript must not be continued as if it were the same conversation.
+                    if (caption != null)
+                        ClearContexts();
+                }
+            }
         }
         public static Caption? Caption => caption;
         public static Setting? Setting => setting;
 
-        public static bool LogOnlyFlag { get; set; } = false;
+        // Paused by default so that launching the app never fires up an LLM on its own.
+        private static bool logOnlyFlag = true;
+
+        public static bool LogOnlyFlag
+        {
+            get => logOnlyFlag;
+            set
+            {
+                if (logOnlyFlag == value)
+                    return;
+                logOnlyFlag = value;
+                PauseChanged?.Invoke();
+            }
+        }
+
+        /// <summary>Raised whenever <see cref="LogOnlyFlag"/> flips; the overlay mirrors the shape.</summary>
+        public static event Action? PauseChanged;
+
+        /// <summary>
+        /// The single place a pause toggle happens from (the overlay's toolbar drives it), so a
+        /// pause always means the same thing: stop calling the API, and drop what is on screen.
+        /// </summary>
+        public static void TogglePause()
+        {
+            LogOnlyFlag = !LogOnlyFlag;
+            ResetDisplay();
+            ClearContexts();
+        }
         public static bool FirstUseFlag { get; set; } = false;
+
+        // A partial sentence is translated only after it has stopped growing for this long, so a
+        // sentence that arrives in ten pieces is translated once instead of ten times.
+        private static int PartialDebounceMs => Math.Max(0, Setting?.PartialDebounceMs ?? 300);
+        // ...but never leave the translation silent longer than this while speech continues.
+        private static int ForceRefreshMs => Math.Max(0, Setting?.ForceRefreshMs ?? 1500);
+        private static int IdleTriggerMs => (Setting?.MaxIdleInterval ?? 50) * FALLBACK_IDLE_POLL_MS;
 
         public static event Action? TranslationLogged;
 
@@ -42,118 +126,222 @@ namespace LiveCaptionsTranslator
 
             caption = Caption.GetInstance();
             setting = Setting.Load();
+            LogOnlyFlag = setting.StartPaused;
         }
 
         public static void SyncLoop()
         {
-            int idleCount = 0;
-            int syncCount = 0;
+            string lastFullText = string.Empty;
+            long lastPollTicks = 0;
+            bool eventDriven = false;
+            bool eventSourceDisabled = false;
+            int missedEvents = 0;
+            int eventsSeen = 0;
+            int quietReconciles = 0;
 
             while (true)
             {
                 if (Window == null)
                 {
-                    Thread.Sleep(2000);
+                    Thread.Sleep(RECONNECT_DELAY_MS);
                     continue;
                 }
 
-                string fullText = string.Empty;
+                if (!eventSourceDisabled)
+                {
+                    if (!eventDriven)
+                    {
+                        // Retry occasionally: the caption element may not exist yet right after launch.
+                        if (Environment.TickCount64 >= nextSubscribeAttemptTicks)
+                        {
+                            if (LiveCaptionsHandler.TrySubscribeCaptionChanges(Window, OnCaptionChanged))
+                            {
+                                eventDriven = true;
+                                lastPollTicks = Environment.TickCount64;
+                                Debug.WriteLine("[SyncLoop] Caption events subscribed.");
+                            }
+                            else
+                                nextSubscribeAttemptTicks = Environment.TickCount64 + SUBSCRIBE_RETRY_MS;
+                        }
+                    }
+                    else if (!LiveCaptionsHandler.IsCaptionChangeSubscribed &&
+                             !LiveCaptionsHandler.TrySubscribeCaptionChanges(Window, OnCaptionChanged))
+                    {
+                        // The element was re-created (LiveCaptions restarted) and is not ready yet.
+                        eventDriven = false;
+                        nextSubscribeAttemptTicks = Environment.TickCount64 + SUBSCRIBE_RETRY_MS;
+                    }
+                }
+
+                bool signaled = false;
+                if (eventDriven)
+                {
+                    signaled = captionChangedSignal.WaitOne(WAIT_SLICE_MS);
+
+                    // Until events have been proven to work (or while nothing is being said) poll
+                    // more often, so a silent provider is detected quickly instead of quietly
+                    // falling behind the captions.
+                    int reconcileMs = eventsSeen >= 2 || quietReconciles >= 3
+                        ? RECONCILE_POLL_MS
+                        : RECONCILE_PROBE_MS;
+
+                    if (!signaled && Environment.TickCount64 - lastPollTicks < reconcileMs)
+                    {
+                        // Nothing to read from LiveCaptions; only the timed triggers can fire here.
+                        CheckTimedTriggers();
+                        continue;
+                    }
+
+                    // An event may have arrived between the wait and the read below.
+                    signaled |= captionChangedSignal.WaitOne(0);
+                }
+
+                long now = Environment.TickCount64;
+                bool textChanged = false;
                 try
                 {
-                    // Check LiveCaptions.exe still alive
-                    var info = Window.Current;
-                    var name = info.Name;
-                    // Get the text recognized by LiveCaptions (10-20ms)
-                    fullText = LiveCaptionsHandler.GetCaptions(Window);
+                    // Get the text recognized by LiveCaptions
+                    string fullText = LiveCaptionsHandler.GetCaptions(Window);
+                    lastPollTicks = now;
+
+                    if (!string.IsNullOrEmpty(fullText) &&
+                        string.CompareOrdinal(fullText, lastFullText) != 0)
+                    {
+                        // A change seen without a corresponding event means the provider dropped it.
+                        if (eventDriven && !signaled)
+                        {
+                            if (++missedEvents >= MAX_MISSED_EVENTS)
+                            {
+                                // Events are not delivered reliably; do not try them again this session.
+                                Debug.WriteLine("[SyncLoop] Caption events look unreliable, falling back to polling.");
+                                eventDriven = false;
+                                eventSourceDisabled = true;
+                                missedEvents = 0;
+                                LiveCaptionsHandler.UnsubscribeCaptionChanges();
+                            }
+                        }
+                        else if (signaled)
+                        {
+                            missedEvents = 0;
+                            eventsSeen++;
+                        }
+
+                        quietReconciles = 0;
+                        lastFullText = fullText;
+                        UpdateCaption(fullText);
+                        textChanged = true;
+                    }
+                    else if (!signaled)
+                        quietReconciles++;
                 }
                 catch (ElementNotAvailableException)
                 {
                     Window = null;
                     continue;
                 }
-                if (string.IsNullOrEmpty(fullText))
-                    continue;
-
-                // Preprocess
-                fullText = RegexPatterns.Acronym().Replace(fullText, "$1$2");
-                fullText = RegexPatterns.AcronymWithWords().Replace(fullText, "$1 $2");
-                fullText = RegexPatterns.PunctuationSpace().Replace(fullText, "$1 ");
-                fullText = RegexPatterns.CJPunctuationSpace().Replace(fullText, "$1");
-                // Note: For certain languages (such as Japanese), LiveCaptions excessively uses `\n`.
-                // Replace redundant `\n` within sentences with comma or period.
-                fullText = TextUtil.ReplaceNewlines(fullText, TextUtil.MEDIUM_THRESHOLD);
-
-                // Prevent adding the last sentence from previous running to log cards
-                // before the first sentence is completed.
-                if (fullText.IndexOfAny(TextUtil.PUNC_EOS) == -1 && Caption.Contexts.Count > 0)
-                    ClearContexts();
-
-                // Get the last sentence.
-                int lastEOSIndex;
-                if (Array.IndexOf(TextUtil.PUNC_EOS, fullText[^1]) != -1)
-                    lastEOSIndex = fullText[0..^1].LastIndexOfAny(TextUtil.PUNC_EOS);
-                else
-                    lastEOSIndex = fullText.LastIndexOfAny(TextUtil.PUNC_EOS);
-                string latestCaption = fullText.Substring(lastEOSIndex + 1);
-
-                // If the last sentence is too short, extend it by adding the previous sentence.
-                // Note: LiveCaptions may generate multiple characters including EOS at once.
-                if (lastEOSIndex > 0 && Encoding.UTF8.GetByteCount(latestCaption) < TextUtil.SHORT_THRESHOLD)
+                catch (Exception ex)
                 {
-                    lastEOSIndex = fullText[0..lastEOSIndex].LastIndexOfAny(TextUtil.PUNC_EOS);
-                    latestCaption = fullText.Substring(lastEOSIndex + 1);
+                    // Preprocessing must never kill this loop silently.
+                    Debug.WriteLine($"[SyncLoop] {ex}");
                 }
 
-                // `OverlayOriginalCaption`: The sentence to be displayed on Overlay Window.
-                Caption.OverlayOriginalCaption = latestCaption;
-                for (int historyCount = Math.Min(Setting.DisplaySentences, Caption.Contexts.Count);
-                     historyCount > 0 && lastEOSIndex > 0;
-                     historyCount--)
-                {
-                    lastEOSIndex = fullText[0..lastEOSIndex].LastIndexOfAny(TextUtil.PUNC_EOS);
-                    Caption.OverlayOriginalCaption = fullText.Substring(lastEOSIndex + 1);
-                }
+                CheckTimedTriggers();
 
-                // `DisplayOriginalCaption`: The sentence to be displayed on Main Window.
-                if (string.CompareOrdinal(Caption.DisplayOriginalCaption, latestCaption) != 0)
-                {
-                    Caption.DisplayOriginalCaption = latestCaption;
-                    // If the last sentence is too long, truncate it when displayed.
-                    Caption.DisplayOriginalCaption =
-                        TextUtil.ShortenDisplaySentence(Caption.DisplayOriginalCaption, TextUtil.VERYLONG_THRESHOLD);
-                }
+                // Provider has no usable events: keep the original poll cadence.
+                if (!eventDriven)
+                    Thread.Sleep(textChanged ? FALLBACK_ACTIVE_POLL_MS : FALLBACK_IDLE_POLL_MS);
+            }
+        }
 
-                // Prepare for `OriginalCaption`. If Expanded, only retain the complete sentence.
-                int lastEOS = latestCaption.LastIndexOfAny(TextUtil.PUNC_EOS);
-                if (lastEOS != -1)
-                    latestCaption = latestCaption.Substring(0, lastEOS + 1);
-                // `OriginalCaption`: The sentence to be really translated.
-                if (string.CompareOrdinal(Caption.OriginalCaption, latestCaption) != 0)
-                {
-                    Caption.OriginalCaption = latestCaption;
+        private static void OnCaptionChanged()
+        {
+            // Raised on a UI Automation worker thread; only signal, never touch UI state here.
+            try
+            {
+                captionChangedSignal.Set();
+            }
+            catch (ObjectDisposedException)
+            {
+            }
+        }
 
-                    idleCount = 0;
-                    if (Array.IndexOf(TextUtil.PUNC_EOS, Caption.OriginalCaption[^1]) != -1)
-                    {
-                        syncCount = 0;
-                        pendingTextQueue.Enqueue(Caption.OriginalCaption);
-                    }
-                    else if (Encoding.UTF8.GetByteCount(Caption.OriginalCaption) >= TextUtil.SHORT_THRESHOLD)
-                        syncCount++;
-                }
-                else
-                    idleCount++;
+        /// <summary>
+        /// Feeds one caption buffer into the pipeline. The only thing that reaches the screen is
+        /// text the stabilizer has declared stable; see <see cref="TranscriptStabilizer"/>.
+        /// </summary>
+        private static void UpdateCaption(string fullText)
+        {
+            string normalized = NormalizeCaption(fullText);
+            if (normalized.Length == 0)
+                return;
 
-                // `TranslateFlag` determines whether this sentence should be translated.
-                // When `OriginalCaption` remains unchanged, `idleCount` +1; when `OriginalCaption` changes, `MaxSyncInterval` +1.
-                if (syncCount > Setting.MaxSyncInterval ||
-                    idleCount == Setting.MaxIdleInterval)
-                {
-                    syncCount = 0;
-                    pendingTextQueue.Enqueue(Caption.OriginalCaption);
-                }
+            long now = Environment.TickCount64;
+            string committed = stabilizer.Update(normalized, now);
+            if (committed.Length == 0)
+                return;
 
-                Thread.Sleep(25);
+            timeline.Append(committed, now);
+            PreemptPartialForFinal();
+            PublishSnapshot();
+        }
+
+        /// <summary>
+        /// Cleans up what LiveCaptions emits. Term normalization happens here rather than on each
+        /// finished segment, because the stabilizer compares the raw hypotheses with each other: a
+        /// word that was rewritten on one side would otherwise break the alignment and re-commit
+        /// text that is already on screen.
+        /// </summary>
+        private static string NormalizeCaption(string fullText)
+        {
+            fullText = RegexPatterns.Acronym().Replace(fullText, "$1$2");
+            fullText = RegexPatterns.AcronymWithWords().Replace(fullText, "$1 $2");
+            fullText = RegexPatterns.PunctuationSpace().Replace(fullText, "$1 ");
+            fullText = RegexPatterns.CJPunctuationSpace().Replace(fullText, "$1");
+            // LiveCaptions wraps its captions wherever the box ends and puts a `\n` there. Those
+            // breaks are display wraps, not sentence ends, so they are joined back into continuous
+            // text: sentence ends come from real punctuation only.
+            fullText = TextUtil.JoinCaptionLines(fullText);
+            return TextUtil.NormalizeSpokenTerms(fullText).Trim();
+        }
+
+        private static void CheckTimedTriggers()
+        {
+            long now = Environment.TickCount64;
+
+            // Nothing else can prove the tail stable once the updates stop: commit it.
+            string flushed = stabilizer.FlushQuiet(now);
+            if (flushed.Length > 0)
+            {
+                timeline.Append(flushed, now);
+                PreemptPartialForFinal();
+                PublishSnapshot();
+            }
+
+            // Long silence: the speaker finished the sentence without any punctuation.
+            if (timeline.OpenIdleMs(now) >= IdleTriggerMs && timeline.FinalizeOpen(now))
+            {
+                PreemptPartialForFinal();
+                PublishSnapshot();
+            }
+        }
+
+        /// <summary>
+        /// Drops a speculative (still-growing sentence) request as soon as a finished sentence is
+        /// waiting. Without this the loop would finish translating a snapshot that is about to be
+        /// thrown away — with one local GPU that is pure delay for the line the reader is on.
+        /// </summary>
+        private static void PreemptPartialForFinal()
+        {
+            if (!inFlightIsPartial || !timeline.HasPendingFinal())
+                return;
+
+            try
+            {
+                inFlight?.Cancel();
+            }
+            catch (ObjectDisposedException)
+            {
+                // The loop already finished with it; nothing to interrupt.
             }
         }
 
@@ -164,79 +352,159 @@ namespace LiveCaptionsTranslator
                 // Check LiveCaptions.exe still alive
                 if (Window == null)
                 {
-                    Caption.DisplayTranslatedCaption = "[WARNING] LiveCaptions was unexpectedly closed, restarting...";
                     Window = LiveCaptionsHandler.LaunchLiveCaptions();
-                    Caption.DisplayTranslatedCaption = "";
                 }
-
-                // Translate
-                if (pendingTextQueue.Count > 0)
-                {
-                    var originalSnapshot = pendingTextQueue.Dequeue();
-
-                    if (LogOnlyFlag)
-                    {
-                        bool isOverwrite = await IsOverwrite(originalSnapshot);
-                        await LogOnly(originalSnapshot, isOverwrite);
-                    }
-                    else
-                    {
-                        translationTaskQueue.Enqueue(token => Task.Run(
-                            () => Translate(originalSnapshot, token), token), originalSnapshot);
-                    }
-                }
-
-                Thread.Sleep(40);
-            }
-        }
-
-        public static async Task DisplayLoop()
-        {
-            while (true)
-            {
-                var (translatedText, isChoke) = translationTaskQueue.Output;
 
                 if (LogOnlyFlag)
                 {
-                    Caption.TranslatedCaption = string.Empty;
-                    Caption.DisplayTranslatedCaption = "[Paused]";
-                    Caption.OverlayNoticePrefix = "[Paused]";
-                    Caption.OverlayCurrentTranslation = string.Empty;
-                }
-                else if (!string.IsNullOrEmpty(RegexPatterns.NoticePrefix().Replace(
-                             translatedText, string.Empty).Trim()) &&
-                         string.CompareOrdinal(Caption.TranslatedCaption, translatedText) != 0)
-                {
-                    // Main page
-                    Caption.TranslatedCaption = translatedText;
-                    Caption.DisplayTranslatedCaption =
-                        TextUtil.ShortenDisplaySentence(Caption.TranslatedCaption, TextUtil.VERYLONG_THRESHOLD);
-
-                    // Overlay window
-                    if (Caption.TranslatedCaption.Contains("[ERROR]") || Caption.TranslatedCaption.Contains("[WARNING]"))
-                        Caption.OverlayCurrentTranslation = Caption.TranslatedCaption;
-                    else
+                    // Paused: still record the finished sentences, but never call the API.
+                    if (timeline.TakeUnrecordedFinal(out _, out string pausedText))
                     {
-                        var match = RegexPatterns.NoticePrefixAndTranslation().Match(Caption.TranslatedCaption);
-                        Caption.OverlayNoticePrefix = match.Groups[1].Value.Trim();
-                        Caption.OverlayCurrentTranslation = match.Groups[2].Value.Trim();
+                        await LogOnly(pausedText);
+                        PublishSnapshot();
+                    }
+                    await Task.Delay(20);
+                    continue;
+                }
+
+                var request = NextRequest();
+                if (request == null)
+                {
+                    await Task.Delay(20);
+                    continue;
+                }
+
+                string translated;
+                using (var cts = new CancellationTokenSource())
+                {
+                    inFlight = cts;
+                    inFlightIsPartial = !request.IsFinal;
+                    try
+                    {
+                        (translated, _) = await Translate(request.Text, request.IsFinal, cts.Token);
+                    }
+                    catch (OperationCanceledException)
+                    {
+                        continue;
+                    }
+                    catch (Exception ex)
+                    {
+                        Debug.WriteLine($"[TranslateLoop] {ex}");
+                        continue;
+                    }
+                    finally
+                    {
+                        if (ReferenceEquals(inFlight, cts))
+                        {
+                            inFlight = null;
+                            inFlightIsPartial = false;
+                        }
                     }
                 }
 
-                // If the original sentence is a complete sentence, choke for better visual experience.
-                if (isChoke)
-                    Thread.Sleep(720);
-                Thread.Sleep(40);
+                var (notice, body) = SplitNotice(translated);
+
+                // The sentence may have finished (or the session been reset) while the request was
+                // in flight; then this result belongs to a line that no longer exists.
+                if (!timeline.ApplyTranslation(request, notice, body))
+                    continue;
+
+                if (request.IsFinal)
+                {
+                    await Log(request.Text, translated);
+                    RememberContext(request.Text, body);
+                    lastLoggedSeq = request.Seq;
+                    lastLoggedWasPartial = false;
+                }
+                else if (Setting?.LogPartialTranslations == true)
+                {
+                    // A mid-sentence translation only replaces the row this same sentence already
+                    // wrote — never a row belonging to an earlier sentence.
+                    bool overwrite = lastLoggedWasPartial && lastLoggedSeq == request.Seq;
+                    await Log(request.Text, translated, overwrite);
+                    lastLoggedSeq = request.Seq;
+                    lastLoggedWasPartial = true;
+                }
+
+                PublishSnapshot();
             }
         }
 
-        public static async Task<(string, bool)> Translate(string text, CancellationToken token = default)
+        private static TranslationRequest? NextRequest()
+        {
+            // Finished sentences first: they are what the reader actually reads.
+            return timeline.NextFinalRequest() ??
+                   timeline.NextLiveRequest(PartialDebounceMs, ForceRefreshMs, Environment.TickCount64);
+        }
+
+        /// <summary>
+        /// Splits the model's `[notice] text` shape once, so the overlay only has to place two
+        /// strings. An error keeps its whole message on the translation line.
+        /// </summary>
+        private static (string Notice, string Body) SplitNotice(string translated)
+        {
+            string text = (translated ?? string.Empty).Trim();
+            if (text.Length == 0)
+                return (string.Empty, string.Empty);
+
+            var match = RegexPatterns.NoticePrefixAndTranslation().Match(text);
+            if (match.Success)
+                return (match.Groups[1].Value.Trim(), match.Groups[2].Value.Trim());
+
+            return (string.Empty, text);
+        }
+
+        /// <summary>Rebuilds and publishes the snapshot the overlay paints.</summary>
+        public static void PublishSnapshot()
+        {
+            var current = Caption;
+            if (current == null)
+                return;
+
+            int count = Math.Max(1, Setting?.DisplaySentences ?? 1);
+            current.Publish(timeline.BuildSnapshot(count, LogOnlyFlag ? "[Paused]" : string.Empty));
+        }
+
+        /// <summary>Re-publishes the current snapshot, e.g. after `DisplaySentences` changed.</summary>
+        public static void Republish() => PublishSnapshot();
+
+        /// <summary>
+        /// Remembers a finished pair for the context window. It is taken from the timeline instead of
+        /// being read back from the database: the row we would have read is the one we just wrote,
+        /// and reading it cost two extra queries per sentence.
+        /// </summary>
+        private static void RememberContext(string source, string translation)
+        {
+            var current = Caption;
+            if (current == null)
+                return;
+
+            long seconds = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+            var entry = new TranslationHistoryEntry
+            {
+                Timestamp = seconds.ToString(CultureInfo.InvariantCulture),
+                TimestampFull = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture),
+                SourceText = source,
+                TranslatedText = translation,
+                TargetLanguage = Setting?.TargetLanguage ?? "N/A",
+                ApiUsed = Setting?.ApiName ?? "N/A"
+            };
+
+            if (current.Contexts.Count >= Caption.MAX_CONTEXTS)
+                current.Contexts.Dequeue();
+            current.Contexts.Enqueue(entry);
+        }
+
+        public static async Task<(string, bool)> Translate(string text, bool isFinal, CancellationToken token = default)
         {
             string translatedText;
-            bool isChoke = Array.IndexOf(TextUtil.PUNC_EOS, text[^1]) != -1;
+            // `isChoke` now means "this segment is finished" rather than "its last character is a
+            // full stop": a segment cut at a clause break is just as finished as one ending in 「。」.
+            bool isChoke = isFinal;
 
             try
             {
+                TranslateAPI.ResetMetrics();
                 var sw = Setting.MainWindow.LatencyShow ? Stopwatch.StartNew() : null;
 
                 if (Setting.ContextAware && !TranslateAPI.IsLLMBased)
@@ -253,10 +521,10 @@ namespace LiveCaptionsTranslator
                 if (sw != null)
                 {
                     sw.Stop();
-                    translatedText = $"[{sw.ElapsedMilliseconds,4} ms] " + translatedText;
+                    translatedText = $"[{FormatLatency(sw.ElapsedMilliseconds)}] " + translatedText;
                 }
             }
-            catch (OperationCanceledException ex)
+            catch (OperationCanceledException) when (token.IsCancellationRequested)
             {
                 throw;
             }
@@ -266,6 +534,20 @@ namespace LiveCaptionsTranslator
             }
 
             return (translatedText, isChoke);
+        }
+
+        /// <summary>
+        /// The `[  812 ms (62+750)]` tag. When the provider reports prompt and generation time
+        /// separately, both are printed: `62+750` means 62 ms of prompt processing and 750 ms of
+        /// token generation. That split is the only way to tell whether prompt caching can help
+        /// (a big first number) or whether the model itself is simply slow (a big second one).
+        /// </summary>
+        private static string FormatLatency(long totalMs)
+        {
+            long prefill = TranslateAPI.LastPromptMs;
+            long decode = TranslateAPI.LastEvalMs;
+            string split = prefill >= 0 && decode >= 0 ? $" ({prefill}+{decode})" : string.Empty;
+            return $"{totalMs,4} ms{split}";
         }
 
         public static async Task Log(string originalText, string translatedText,
@@ -316,45 +598,25 @@ namespace LiveCaptionsTranslator
             catch (Exception ex)
             {
                 SnackbarHost.Show("[ERROR] Logging history failed.", ex.Message, SnackbarType.Error,
-                    timeout: 2, closeButton: true);
+                                   timeout: 2, closeButton: true);
             }
-        }
-
-        public static async Task AddContexts(CancellationToken token = default)
-        {
-            var lastLog = await SQLiteHistoryLogger.LoadLastTranslation(token);
-            if (lastLog == null)
-                return;
-
-            if (Caption?.Contexts.Count >= Caption.MAX_CONTEXTS)
-                Caption.Contexts.Dequeue();
-            Caption?.Contexts.Enqueue(lastLog);
-
-            Caption?.OnPropertyChanged("DisplayLogCards");
-            Caption?.OnPropertyChanged("OverlayPreviousTranslation");
         }
 
         public static void ClearContexts()
         {
             Caption?.Contexts.Clear();
-
-            Caption?.OnPropertyChanged("DisplayLogCards");
-            Caption?.OnPropertyChanged("OverlayPreviousTranslation");
+            stabilizer.Reset();
+            timeline.Reset();
+            inFlight?.Cancel();
+            PublishSnapshot();
         }
 
-        // If this text is too similar to the last one, overwrite it when logging.
-        public static async Task<bool> IsOverwrite(string originalText, CancellationToken token = default)
+        // Called when translation is paused or resumed: whatever is in flight belongs to the state
+        // we just left, so it must not pop up afterwards.
+        public static void ResetDisplay()
         {
-            string lastOriginalText = await SQLiteHistoryLogger.LoadLastSourceText(token);
-            if (lastOriginalText == null)
-                return false;
-
-            int minLen = Math.Min(originalText.Length, lastOriginalText.Length);
-            originalText = originalText.Substring(0, minLen);
-            lastOriginalText = lastOriginalText.Substring(0, minLen);
-
-            double similarity = TextUtil.Similarity(originalText, lastOriginalText);
-            return similarity > TextUtil.SIM_THRESHOLD;
+            inFlight?.Cancel();
+            PublishSnapshot();
         }
     }
 }

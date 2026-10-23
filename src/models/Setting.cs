@@ -12,11 +12,19 @@ namespace LiveCaptionsTranslator.models
     public class Setting : INotifyPropertyChanged
     {
         public static readonly string FILENAME = "setting.json";
+        private const int SAVE_DEBOUNCE_MS = 500;
+
+        private readonly object saveLock = new();
+        private Timer? saveTimer;
 
         public event PropertyChangedEventHandler? PropertyChanged;
 
         private int maxIdleInterval = 50;
         private int maxSyncInterval = 3;
+        private int partialDebounceMs = 300;
+        private int minDwellMs = 900;
+        private bool startPaused = true;
+        private bool logPartialTranslations = false;
         private int numContexts = 2;
         private int displaySentences = 1;
         private bool contextAware = false;
@@ -41,6 +49,56 @@ namespace LiveCaptionsTranslator.models
             {
                 maxSyncInterval = value;
                 OnPropertyChanged("MaxSyncInterval");
+            }
+        }
+
+        // The "API Interval" slider used to count caption updates. It now sets how long a still
+        // growing sentence may go untranslated before a refresh is forced: 0 -> 500 ms (most
+        // frequent), 10 -> 3 s (most stable).
+        [JsonIgnore]
+        public int ForceRefreshMs => 500 + maxSyncInterval * 250;
+
+        // How long a partial sentence must stop changing before it is translated.
+        public int PartialDebounceMs
+        {
+            get => partialDebounceMs;
+            set
+            {
+                partialDebounceMs = Math.Max(0, value);
+                OnPropertyChanged("PartialDebounceMs");
+            }
+        }
+
+        // How long a translated line stays on screen before a partial result may replace it.
+        public int MinDwellMs
+        {
+            get => minDwellMs;
+            set
+            {
+                minDwellMs = Math.Max(0, value);
+                OnPropertyChanged("MinDwellMs");
+            }
+        }
+
+        // Start with translation paused, so launching the app does not call the API right away.
+        public bool StartPaused
+        {
+            get => startPaused;
+            set
+            {
+                startPaused = value;
+                OnPropertyChanged("StartPaused");
+            }
+        }
+
+        // Keep partial (mid-sentence) translations in the history as well.
+        public bool LogPartialTranslations
+        {
+            get => logPartialTranslations;
+            set
+            {
+                logPartialTranslations = value;
+                OnPropertyChanged("LogPartialTranslations");
             }
         }
         public int NumContexts
@@ -282,23 +340,48 @@ namespace LiveCaptionsTranslator.models
             Save(FILENAME);
         }
 
+        // Writes are coalesced: window drags and text box edits would otherwise hit the disk
+        // dozens of times per second on the UI thread.
+        public void SaveDebounced()
+        {
+            lock (saveLock)
+            {
+                saveTimer ??= new Timer(_ =>
+                {
+                    try
+                    {
+                        Save(FILENAME);
+                    }
+                    catch (Exception ex)
+                    {
+                        System.Diagnostics.Debug.WriteLine($"[Setting] Save failed: {ex}");
+                    }
+                }, null, Timeout.Infinite, Timeout.Infinite);
+                saveTimer.Change(SAVE_DEBOUNCE_MS, Timeout.Infinite);
+            }
+        }
+
         public void Save(string jsonPath)
         {
-            using (FileStream fileStream = File.Open(jsonPath, FileMode.Create, FileAccess.Write, FileShare.Read))
+            lock (saveLock)
             {
+                // Serialize to memory first so a failure (or a concurrent edit) never leaves
+                // a truncated setting.json behind.
+                using var buffer = new MemoryStream();
                 var options = new JsonSerializerOptions
                 {
                     WriteIndented = true,
                     Converters = { new ConfigDictConverter() }
                 };
-                JsonSerializer.Serialize(fileStream, this, options);
+                JsonSerializer.Serialize(buffer, this, options);
+                File.WriteAllBytes(jsonPath, buffer.ToArray());
             }
         }
 
         public void OnPropertyChanged([CallerMemberName] string? propName = null)
         {
             PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(propName));
-            Translator.Setting?.Save();
+            SaveDebounced();
         }
 
         public static bool IsConfigExist()

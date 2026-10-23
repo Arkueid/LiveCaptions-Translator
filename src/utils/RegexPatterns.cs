@@ -20,10 +20,15 @@ namespace LiveCaptionsTranslator.utils
         [GeneratedRegex(@"\s*([。！？，、])\s*")]
         public static partial Regex CJPunctuationSpace();
 
-        [GeneratedRegex(@"^(\[.+\] )?(.*)$")]
+        // `[...]` notice prefix (monospace latency tag, `[ERROR]`, `[WARNING]`, `[Paused]`).
+        // The bracket part is restricted to a single line without inner brackets, so it can never
+        // swallow a chunk of the translation; the body matches anything, including the newlines a
+        // model sometimes emits (without `[\s\S]` the whole match fails and the body comes back
+        // empty, which used to make the overlay lose its translation line).
+        [GeneratedRegex(@"^(\[[^\]\r\n]+\] )?([\s\S]*)$")]
         public static partial Regex NoticePrefixAndTranslation();
 
-        [GeneratedRegex(@"^\[.+\] ")]
+        [GeneratedRegex(@"^\[[^\]\r\n]+\] ")]
         public static partial Regex NoticePrefix();
 
         [GeneratedRegex(@"^(https?:\/\/)")]

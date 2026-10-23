@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Text;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Documents;
@@ -32,9 +33,22 @@ namespace LiveCaptionsTranslator
             set => SetValue(StrokeThicknessProperty, value);
         }
 
+        // Rendering is cached: the overlay rebuilds its inlines several times per second and both the
+        // text layout and `FormattedText.BuildGeometry` (glyph outline extraction) are expensive.
+        private FormattedText? cachedText;
+        private Geometry? cachedGeometry;
+        private ulong cachedKey;
+        private bool hasCache;
+
+        private Pen? cachedPen;
+        private Brush? cachedPenBrush;
+        private double cachedPenThickness;
+
         protected override void OnVisualChildrenChanged(DependencyObject visualAdded, DependencyObject visualRemoved)
         {
             base.OnVisualChildrenChanged(visualAdded, visualRemoved);
+
+            hasCache = false;
 
             if (visualRemoved is TextBlock oldTextBlock)
             {
@@ -57,77 +71,203 @@ namespace LiveCaptionsTranslator
                 return;
             }
 
-            var pen = new Pen(Stroke, StrokeThickness)
+            double pixelsPerDip = VisualTreeHelper.GetDpi(this).PixelsPerDip;
+            ulong key = ComputeCacheKey(textBlock, pixelsPerDip);
+            if (!hasCache || key != cachedKey)
             {
-                DashCap = PenLineCap.Round,
-                EndLineCap = PenLineCap.Round,
-                LineJoin = PenLineJoin.Round,
-                StartLineCap = PenLineCap.Round
-            };
+                cachedKey = key;
+                hasCache = true;
+                cachedText = BuildFormattedText(textBlock, pixelsPerDip);
+                cachedGeometry = null;
+            }
 
+            if (cachedText == null)
+                return;
+
+            if (StrokeThickness > 0)
+            {
+                // Built lazily on purpose: the default configuration has no stroke at all, so most
+                // caption updates never pay for a geometry build.
+                cachedGeometry ??= cachedText.BuildGeometry(new Point(0, 0));
+                drawingContext.DrawGeometry(null, GetStrokePen(), cachedGeometry);
+            }
+
+            drawingContext.DrawText(cachedText, new Point(0, 0));
+        }
+
+        private static FormattedText BuildFormattedText(TextBlock textBlock, double pixelsPerDip)
+        {
             var typeface = new Typeface(
                 textBlock.FontFamily, textBlock.FontStyle, textBlock.FontWeight, textBlock.FontStretch);
+
+            FormattedText formattedText;
+
             if (textBlock.Inlines != null && textBlock.Inlines.Count > 0)
             {
-                // Inlines, process each Run
-                var formattedText = new FormattedText(
-                    string.Concat(textBlock.Inlines.OfType<Run>().Select(r => r.Text ?? string.Empty)),
+                // Inlines, process each Run. LineBreak inlines become "\n" so that
+                // multi-line captions keep their per-line formatting.
+                var builder = new StringBuilder();
+                var runs = new List<(Run Run, int Start, int Length)>();
+                int position = 0;
+                foreach (var inline in textBlock.Inlines)
+                {
+                    switch (inline)
+                    {
+                        case Run run:
+                            string runText = run.Text ?? string.Empty;
+                            if (runText.Length == 0)
+                                break;
+                            runs.Add((run, position, runText.Length));
+                            builder.Append(runText);
+                            position += runText.Length;
+                            break;
+                        case LineBreak:
+                            builder.Append('\n');
+                            position += 1;
+                            break;
+                    }
+                }
+
+                formattedText = new FormattedText(
+                    builder.ToString(),
                     CultureInfo.CurrentUICulture,
                     textBlock.FlowDirection,
                     typeface,
                     textBlock.FontSize,
                     textBlock.Foreground,
-                    VisualTreeHelper.GetDpi(this).PixelsPerDip);
+                    pixelsPerDip);
 
-                formattedText.TextAlignment = textBlock.TextAlignment;
-                formattedText.Trimming = textBlock.TextTrimming;
-                formattedText.MaxTextWidth = textBlock.ActualWidth > 0 ? textBlock.ActualWidth : double.MaxValue;
-                formattedText.MaxTextHeight = textBlock.ActualHeight > 0 ? textBlock.ActualHeight : double.MaxValue;
+                ApplyLayoutSettings(formattedText, textBlock);
 
-                int pos = 0;
-                foreach (var run in textBlock.Inlines.OfType<Run>())
+                foreach (var (run, start, length) in runs)
                 {
-                    int len = (run.Text ?? string.Empty).Length;
-                    if (len == 0)
-                        continue;
-                    formattedText.SetFontFamily(run.FontFamily ?? textBlock.FontFamily, pos, len);
-                    formattedText.SetFontSize(GetValue(run, Run.FontSizeProperty, textBlock.FontSize), pos, len);
-                    formattedText.SetFontWeight(GetValue(run, Run.FontWeightProperty, textBlock.FontWeight), pos, len);
-                    formattedText.SetFontStyle(GetValue(run, Run.FontStyleProperty, textBlock.FontStyle), pos, len);
-                    formattedText.SetFontStretch(GetValue(run, Run.FontStretchProperty, textBlock.FontStretch), pos,
-                        len);
-                    formattedText.SetForegroundBrush(run.Foreground ?? textBlock.Foreground, pos, len);
-                    pos += len;
+                    formattedText.SetFontFamily(run.FontFamily ?? textBlock.FontFamily, start, length);
+                    formattedText.SetFontSize(GetValue(run, Run.FontSizeProperty, textBlock.FontSize), start, length);
+                    formattedText.SetFontWeight(GetValue(run, Run.FontWeightProperty, textBlock.FontWeight), start,
+                        length);
+                    formattedText.SetFontStyle(GetValue(run, Run.FontStyleProperty, textBlock.FontStyle), start, length);
+                    formattedText.SetFontStretch(GetValue(run, Run.FontStretchProperty, textBlock.FontStretch), start,
+                        length);
+                    formattedText.SetForegroundBrush(run.Foreground ?? textBlock.Foreground, start, length);
                 }
-
-                var geometry = formattedText.BuildGeometry(new Point(0, 0));
-                drawingContext.DrawGeometry(null, pen, geometry);
-                drawingContext.DrawText(formattedText, new Point(0, 0));
             }
             else
             {
                 // No Inlines, process the TextBlock
-                var formattedText = new FormattedText(
+                formattedText = new FormattedText(
                     textBlock.Text ?? string.Empty,
                     CultureInfo.CurrentUICulture,
                     textBlock.FlowDirection,
                     typeface,
                     textBlock.FontSize,
                     textBlock.Foreground,
-                    VisualTreeHelper.GetDpi(this).PixelsPerDip);
+                    pixelsPerDip);
 
-                formattedText.TextAlignment = textBlock.TextAlignment;
-                formattedText.Trimming = textBlock.TextTrimming;
-                formattedText.MaxTextWidth = textBlock.ActualWidth > 0 ? textBlock.ActualWidth : double.MaxValue;
-                formattedText.MaxTextHeight = textBlock.ActualHeight > 0 ? textBlock.ActualHeight : double.MaxValue;
+                ApplyLayoutSettings(formattedText, textBlock);
 
                 if (textBlock.TextWrapping == TextWrapping.NoWrap)
                     formattedText.MaxLineCount = 1;
-
-                var geometry = formattedText.BuildGeometry(new Point(0, 0));
-                drawingContext.DrawGeometry(null, pen, geometry);
-                drawingContext.DrawText(formattedText, new Point(0, 0));
             }
+
+            return formattedText;
+        }
+
+        private static void ApplyLayoutSettings(FormattedText formattedText, TextBlock textBlock)
+        {
+            formattedText.TextAlignment = textBlock.TextAlignment;
+            formattedText.Trimming = textBlock.TextTrimming;
+            formattedText.MaxTextWidth = textBlock.ActualWidth > 0 ? textBlock.ActualWidth : double.MaxValue;
+
+            // `MaxTextHeight` is left unset on purpose. `FormattedText` silently drops the last line
+            // when the laid-out height exceeds this limit — even by a rounding step — and the overlay
+            // always sets `LineHeight`, which makes the laid-out height land exactly on the measured
+            // height. The result was that the final caption line (the translation) was never painted:
+            // with `DisplaySentences = 1` the overlay showed the source line only.
+            // This decorator only paints what its child already measured, so no height clamp is needed.
+
+            // Keep the drawn text on the same line grid the TextBlock was measured with.
+            if (!double.IsNaN(textBlock.LineHeight) && textBlock.LineHeight > 0)
+                formattedText.LineHeight = textBlock.LineHeight;
+        }
+
+        private Pen GetStrokePen()
+        {
+            Brush brush = Stroke ?? Brushes.Black;
+            double thickness = StrokeThickness;
+
+            if (cachedPen == null ||
+                !ReferenceEquals(cachedPenBrush, brush) ||
+                cachedPenThickness != thickness)
+            {
+                cachedPen = new Pen(brush, thickness)
+                {
+                    DashCap = PenLineCap.Round,
+                    EndLineCap = PenLineCap.Round,
+                    LineJoin = PenLineJoin.Round,
+                    StartLineCap = PenLineCap.Round
+                };
+                cachedPenBrush = brush;
+                cachedPenThickness = thickness;
+            }
+
+            return cachedPen;
+        }
+
+        // Everything that changes the rendered output has to be part of the key, including the
+        // measured size, because it decides where lines wrap.
+        private static ulong ComputeCacheKey(TextBlock textBlock, double pixelsPerDip)
+        {
+            ulong hash = 14695981039346656037UL;
+
+            void Mix(ulong value) => hash = (hash ^ value) * 1099511628211UL;
+            void MixDouble(double value) => Mix((ulong)BitConverter.DoubleToInt64Bits(value));
+
+            MixDouble(pixelsPerDip);
+            MixDouble(textBlock.ActualWidth);
+            MixDouble(textBlock.ActualHeight);
+            MixDouble(textBlock.FontSize);
+            MixDouble(double.IsNaN(textBlock.LineHeight) ? 0 : textBlock.LineHeight);
+            Mix((ulong)(int)textBlock.TextAlignment);
+            Mix((ulong)(int)textBlock.TextTrimming);
+            Mix((ulong)(int)textBlock.TextWrapping);
+            Mix((ulong)(int)textBlock.FlowDirection);
+            Mix((ulong)(int)textBlock.LineStackingStrategy);
+            Mix((ulong)(textBlock.FontFamily?.Source?.GetHashCode() ?? 0));
+            Mix((ulong)textBlock.FontWeight.ToOpenTypeWeight());
+            Mix((ulong)textBlock.FontStyle.GetHashCode());
+            Mix((ulong)textBlock.FontStretch.GetHashCode());
+            Mix((ulong)(textBlock.Foreground?.GetHashCode() ?? 0));
+
+            if (textBlock.Inlines != null && textBlock.Inlines.Count > 0)
+            {
+                foreach (var inline in textBlock.Inlines)
+                {
+                    switch (inline)
+                    {
+                        case Run run:
+                            Mix((ulong)'R');
+                            Mix((ulong)((run.FontFamily ?? textBlock.FontFamily)?.Source?.GetHashCode() ?? 0));
+                            MixDouble(GetValue(run, Run.FontSizeProperty, textBlock.FontSize));
+                            Mix((ulong)GetValue(run, Run.FontWeightProperty, textBlock.FontWeight).ToOpenTypeWeight());
+                            Mix((uint)GetValue(run, Run.FontStyleProperty, textBlock.FontStyle).GetHashCode());
+                            Mix((uint)GetValue(run, Run.FontStretchProperty, textBlock.FontStretch).GetHashCode());
+                            Mix((ulong)((run.Foreground ?? textBlock.Foreground)?.GetHashCode() ?? 0));
+                            foreach (char c in run.Text ?? string.Empty)
+                                Mix(c);
+                            break;
+                        case LineBreak:
+                            Mix((ulong)'\n');
+                            break;
+                    }
+                }
+            }
+            else
+            {
+                foreach (char c in textBlock.Text ?? string.Empty)
+                    Mix(c);
+            }
+
+            return hash;
         }
 
         protected override Size MeasureOverride(Size constraint)
@@ -164,6 +304,7 @@ namespace LiveCaptionsTranslator
             RegisterPropertyListener(textBlock, TextBlock.TextAlignmentProperty);
             RegisterPropertyListener(textBlock, TextBlock.TextTrimmingProperty);
             RegisterPropertyListener(textBlock, TextBlock.TextWrappingProperty);
+            RegisterPropertyListener(textBlock, TextBlock.LineHeightProperty);
         }
 
         private void UnregisterTextBlockListeners(TextBlock textBlock)
@@ -178,6 +319,7 @@ namespace LiveCaptionsTranslator
             UnregisterPropertyListener(textBlock, TextBlock.TextAlignmentProperty);
             UnregisterPropertyListener(textBlock, TextBlock.TextTrimmingProperty);
             UnregisterPropertyListener(textBlock, TextBlock.TextWrappingProperty);
+            UnregisterPropertyListener(textBlock, TextBlock.LineHeightProperty);
         }
 
         private void RegisterRunListeners(TextBlock textBlock)

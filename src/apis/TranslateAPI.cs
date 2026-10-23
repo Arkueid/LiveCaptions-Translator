@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Net;
 using System.Net.Http;
 using System.Text;
@@ -50,6 +51,24 @@ namespace LiveCaptionsTranslator.apis
             Timeout = TimeSpan.FromSeconds(8)
         };
         private static int openai_fallback_index = 0;
+
+        /// <summary>
+        /// Prompt processing time of the last local answer, in ms (-1 when the provider does not
+        /// report it). Kept apart from decoding because the two have completely different cures:
+        /// prefill is what prompt caching removes, decoding is what a smaller model removes.
+        /// </summary>
+        public static long LastPromptMs { get; private set; } = -1;
+        /// <summary>Token generation time of the last local answer, in ms (-1 when unreported).</summary>
+        public static long LastEvalMs { get; private set; } = -1;
+        /// <summary>Size of the prompt that had to be processed, in tokens.</summary>
+        public static int LastPromptTokens { get; private set; }
+
+        public static void ResetMetrics()
+        {
+            LastPromptMs = -1;
+            LastEvalMs = -1;
+            LastPromptTokens = 0;
+        }
 
         public static async Task<string> OpenAI(string text, CancellationToken token = default)
         {
@@ -185,6 +204,18 @@ namespace LiveCaptionsTranslator.apis
             {
                 string responseString = await response.Content.ReadAsStringAsync();
                 var responseObj = JsonSerializer.Deserialize<OllamaConfig.Response>(responseString);
+
+                // Durations are nanoseconds. The split decides whether prompt caching is worth
+                // anything: if prefill is a large share, an unchanged prompt prefix is worth real
+                // time; if it is noise next to decoding, caching the context buys nothing.
+                LastPromptMs = responseObj.prompt_eval_duration / 1_000_000;
+                LastEvalMs = responseObj.eval_duration / 1_000_000;
+                LastPromptTokens = responseObj.prompt_eval_count;
+                Debug.WriteLine(
+                    $"[Ollama] prefill {LastPromptMs} ms ({responseObj.prompt_eval_count} tok), " +
+                    $"decode {LastEvalMs} ms ({responseObj.eval_count} tok), " +
+                    $"load {responseObj.load_duration / 1_000_000} ms");
+
                 var output = responseObj.message.content;
                 return RegexPatterns.ModelThinking().Replace(output, "");
             }

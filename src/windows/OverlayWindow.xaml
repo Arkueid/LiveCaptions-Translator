@@ -29,6 +29,31 @@
             <Setter Property="BorderThickness" Value="0" />
             <Setter Property="Opacity" Value="0" />
         </Style>
+
+        <!--
+            Compact tool buttons for the overlay. BasedOn keeps the WPF-UI template (hover and
+            pressed states); without it the buttons fall back to plain WPF chrome, which is the
+            light-gray squares the old bar showed.
+        -->
+        <Style
+            x:Key="OverlayToolButton"
+            BasedOn="{StaticResource {x:Type ui:Button}}"
+            TargetType="{x:Type ui:Button}">
+            <Setter Property="Width" Value="26" />
+            <Setter Property="Height" Value="26" />
+            <Setter Property="Padding" Value="0" />
+            <Setter Property="Margin" Value="0" />
+            <Setter Property="Appearance" Value="Transparent" />
+            <Setter Property="Foreground" Value="#EBFFFFFF" />
+            <Setter Property="Cursor" Value="Hand" />
+        </Style>
+        <Style x:Key="OverlayToolSeparator" TargetType="Rectangle">
+            <Setter Property="Width" Value="1" />
+            <Setter Property="Height" Value="14" />
+            <Setter Property="Fill" Value="#26FFFFFF" />
+            <Setter Property="Margin" Value="5,0" />
+            <Setter Property="VerticalAlignment" Value="Center" />
+        </Style>
     </Window.Resources>
 
     <Grid>
@@ -39,168 +64,141 @@
             CornerRadius="8"
             MouseLeftButtonDown="Border_MouseLeftButtonDown">
             <Grid>
-                <Grid.RowDefinitions>
-                    <RowDefinition Height="Auto" />
-                    <RowDefinition Height="*" />
-                </Grid.RowDefinitions>
-                <Grid.Resources>
-                    <Style x:Key="CaptionBlockStyle" TargetType="TextBlock">
-                        <Setter Property="TextWrapping" Value="Wrap" />
-                        <Setter Property="VerticalAlignment" Value="Stretch" />
-                    </Style>
-                </Grid.Resources>
-
                 <ui:Card
-                    x:Name="TranslatedCaptionCard"
-                    Grid.Row="0"
-                    Margin="5,2,5,2"
-                    Padding="8"
+                    x:Name="CaptionCard"
+                    Margin="6,4,6,4"
+                    Padding="14,10"
                     VerticalAlignment="Top"
                     Background="Transparent"
                     BorderThickness="0">
-                    <local:StrokeDecorator
-                        x:Name="TranslatedCaptionDecorator"
-                        Stroke="Black"
-                        StrokeThickness="0">
-                        <TextBlock
-                            x:Name="TranslatedCaption"
-                            FontSize="18"
-                            Style="{StaticResource CaptionBlockStyle}">
-                            <Run x:Name="NoticePrefixRun" Text="{Binding OverlayNoticePrefix, UpdateSourceTrigger=PropertyChanged}" FontFamily="Consolas" />
-                            <Run x:Name="PreviousTranslationRun" Text="{Binding OverlayPreviousTranslation, Mode=OneWay}" />
-                            <Run x:Name="CurrentTranslationRun" Text="{Binding OverlayCurrentTranslation, UpdateSourceTrigger=PropertyChanged}" />
-                        </TextBlock>
-                    </local:StrokeDecorator>
-                </ui:Card>
-                <ui:Card
-                    x:Name="OriginalCaptionCard"
-                    Grid.Row="1"
-                    Margin="5,2,5,2"
-                    Padding="8"
-                    VerticalAlignment="Top"
-                    Background="Transparent"
-                    BorderThickness="0">
-                    <local:StrokeDecorator
-                        x:Name="OriginalCaptionDecorator"
-                        Stroke="Black"
-                        StrokeThickness="0">
-                        <TextBlock
-                            x:Name="OriginalCaption"
-                            FontSize="15"
-                            Style="{StaticResource CaptionBlockStyle}"
-                            Text="{Binding OverlayOriginalCaption, UpdateSourceTrigger=PropertyChanged}">
-                        </TextBlock>
-                    </local:StrokeDecorator>
+                    <!--
+                        One block per sentence pair, created in code. A blank text line between pairs
+                        always costs a full line height (a line box is never shorter than `LineHeight`,
+                        so a small-font spacer run did not help), which left far too much air between
+                        groups. As separate blocks the gap is an exact margin.
+                    -->
+                    <StackPanel x:Name="CaptionStack" />
                 </ui:Card>
 
-                <StackPanel
+                <!--
+                    The tools live on their own translucent pill and are only faded in while the
+                    pointer is on the overlay, so they never sit on top of the captions. The pause
+                    toggle is first: it is the one control that changes what is being said on screen
+                    (translation on/off), so it gets a real shape of its own — bars while running,
+                    a triangle while paused — instead of a filled/unfilled variant of one glyph.
+                -->
+                <Border
                     x:Name="ControlPanel"
-                    Grid.Row="1"
-                    Margin="0,0,5,5"
+                    Margin="0,0,8,7"
+                    Padding="4"
                     HorizontalAlignment="Right"
                     VerticalAlignment="Bottom"
-                    Orientation="Horizontal">
-                    <ui:Button
-                        x:Name="FontSizeIncrease"
-                        Background="#FFAAAAAA"
-                        Click="FontIncrease_Click"
-                        Cursor="Hand"
-                        Icon="{ui:SymbolIcon fontIncrease20,
-                                             Filled=False}"
-                        ToolTip="Font Size Increase" />
-                    <ui:Button
-                        x:Name="FontSizeDecrease"
-                        Background="#FFAAAAAA"
-                        Click="FontDecrease_Click"
-                        Cursor="Hand"
-                        Icon="{ui:SymbolIcon fontDecrease20,
-                                             Filled=False}"
-                        ToolTip="Font Size Decrease" />
-                    <ui:Button
-                        x:Name="FontStrokeIncrease"
-                        Background="#FFAAAAAA"
-                        Click="FontStrokeIncrease_Click"
-                        Cursor="Hand"
-                        Icon="{ui:SymbolIcon InkStroke20,
-                                             Filled=True}"
-                        ToolTip="Font Stroke Increase" />
-                    <ui:Button
-                        x:Name="FontStrokeDecrease"
-                        Background="#FFAAAAAA"
-                        Click="FontStrokeDecrease_Click"
-                        Cursor="Hand"
-                        Icon="{ui:SymbolIcon InkStrokeArrowDown20,
-                                             Filled=False}"
-                        ToolTip="Font Stroke Decrease" />
-                    <ui:Button
-                        x:Name="FontBold"
-                        Background="#FFAAAAAA"
-                        Click="FontBold_Click"
-                        Cursor="Hand"
-                        Icon="{ui:SymbolIcon textBold16,
-                                             Filled=False}"
-                        ToolTip="Font Bold" />
-                    <ui:Button
-                        x:Name="FontColorCycle"
-                        Background="#FFAAAAAA"
-                        Click="FontColorCycle_Click"
-                        Cursor="Hand"
-                        Icon="{ui:SymbolIcon color16,
-                                             Filled=False}"
-                        ToolTip="Font Color" />
+                    Background="#C2101010"
+                    BorderBrush="#28FFFFFF"
+                    BorderThickness="1"
+                    CornerRadius="10"
+                    IsHitTestVisible="False"
+                    Opacity="0">
+                    <StackPanel Orientation="Horizontal">
+                        <ui:Button
+                            x:Name="PauseButton"
+                            Click="PauseButton_Click"
+                            Style="{StaticResource OverlayToolButton}"
+                            ToolTip="Pause Translation">
+                            <ui:SymbolIcon x:Name="PauseIcon" FontSize="15" Symbol="Pause20" />
+                        </ui:Button>
+                        <Rectangle Style="{StaticResource OverlayToolSeparator}" />
 
-                    <ui:Button
-                        x:Name="OpacityIncrease"
-                        Margin="5,0,0,0"
-                        Background="#FFAAAAAA"
-                        Click="BackgroundOpacityIncrease_Click"
-                        Cursor="Hand"
-                        Icon="{ui:SymbolIcon arrowAutofitUp20,
-                                             Filled=False}"
-                        ToolTip="Background Opacity Increase" />
-                    <ui:Button
-                        x:Name="OpacityDecrease"
-                        Background="#FFAAAAAA"
-                        Click="BackgroundOpacityDecrease_Click"
-                        Cursor="Hand"
-                        Icon="{ui:SymbolIcon arrowAutofitDown20,
-                                             Filled=False}"
-                        ToolTip="Background Opacity Decrease" />
-                    <ui:Button
-                        x:Name="BackgroundColorCycle"
-                        Background="#FFAAAAAA"
-                        Click="BackgroundColorCycle_Click"
-                        Cursor="Hand"
-                        Icon="{ui:SymbolIcon color16,
-                                             Filled=False}"
-                        ToolTip="Background Color" />
+                        <ui:Button
+                            x:Name="FontSizeDecrease"
+                            Click="FontDecrease_Click"
+                            Style="{StaticResource OverlayToolButton}"
+                            ToolTip="Font Size Decrease">
+                            <ui:SymbolIcon FontSize="15" Symbol="FontDecrease20" />
+                        </ui:Button>
+                        <ui:Button
+                            x:Name="FontSizeIncrease"
+                            Click="FontIncrease_Click"
+                            Style="{StaticResource OverlayToolButton}"
+                            ToolTip="Font Size Increase">
+                            <ui:SymbolIcon FontSize="15" Symbol="FontIncrease20" />
+                        </ui:Button>
+                        <ui:Button
+                            x:Name="FontStrokeDecrease"
+                            Click="FontStrokeDecrease_Click"
+                            Style="{StaticResource OverlayToolButton}"
+                            ToolTip="Font Stroke Decrease">
+                            <ui:SymbolIcon FontSize="15" Symbol="InkStrokeArrowDown20" />
+                        </ui:Button>
+                        <ui:Button
+                            x:Name="FontStrokeIncrease"
+                            Click="FontStrokeIncrease_Click"
+                            Style="{StaticResource OverlayToolButton}"
+                            ToolTip="Font Stroke Increase">
+                            <ui:SymbolIcon FontSize="15" Symbol="InkStroke20" />
+                        </ui:Button>
+                        <ui:Button
+                            x:Name="FontBold"
+                            Click="FontBold_Click"
+                            Style="{StaticResource OverlayToolButton}"
+                            ToolTip="Font Bold">
+                            <ui:SymbolIcon FontSize="15" Symbol="TextBold16" />
+                        </ui:Button>
+                        <ui:Button
+                            x:Name="FontColorCycle"
+                            Click="FontColorCycle_Click"
+                            Style="{StaticResource OverlayToolButton}"
+                            ToolTip="Font Color">
+                            <ui:SymbolIcon FontSize="15" Symbol="Color16" />
+                        </ui:Button>
+                        <Rectangle Style="{StaticResource OverlayToolSeparator}" />
 
-                    <ui:Button
-                        x:Name="OnlyModeButton"
-                        Margin="5,0,0,0"
-                        Background="#FFAAAAAA"
-                        Click="OnlyModeButton_Click"
-                        Cursor="Hand"
-                        Icon="{ui:SymbolIcon PanelBottom20,
-                                             Filled=False}"
-                        ToolTip="Show only subtitles or translations" />
-                    <ui:Button
-                        x:Name="SwitchModeButton"
-                        Background="#FFAAAAAA"
-                        Click="SwitchModeButton_Click"
-                        Cursor="Hand"
-                        Icon="{ui:SymbolIcon ArrowSyncCircle20,
-                                             Filled=False}"
-                        ToolTip="Switch the order of subtitles and translations" />
-                    <ui:Button
-                        x:Name="ClickThrough"
-                        Background="#FFAAAAAA"
-                        Click="ClickThrough_Click"
-                        Cursor="Hand"
-                        Icon="{ui:SymbolIcon lockClosed16,
-                                             Filled=False}"
-                        ToolTip="Click Through" />
-                </StackPanel>
+                        <ui:Button
+                            x:Name="OpacityDecrease"
+                            Click="BackgroundOpacityDecrease_Click"
+                            Style="{StaticResource OverlayToolButton}"
+                            ToolTip="Background Opacity Decrease">
+                            <ui:SymbolIcon FontSize="15" Symbol="Subtract20" />
+                        </ui:Button>
+                        <ui:Button
+                            x:Name="OpacityIncrease"
+                            Click="BackgroundOpacityIncrease_Click"
+                            Style="{StaticResource OverlayToolButton}"
+                            ToolTip="Background Opacity Increase">
+                            <ui:SymbolIcon FontSize="15" Symbol="Add20" />
+                        </ui:Button>
+                        <ui:Button
+                            x:Name="BackgroundColorCycle"
+                            Click="BackgroundColorCycle_Click"
+                            Style="{StaticResource OverlayToolButton}"
+                            ToolTip="Background Color">
+                            <ui:SymbolIcon FontSize="15" Symbol="ColorBackground20" />
+                        </ui:Button>
+                        <Rectangle Style="{StaticResource OverlayToolSeparator}" />
+
+                        <ui:Button
+                            x:Name="OnlyModeButton"
+                            Click="OnlyModeButton_Click"
+                            Style="{StaticResource OverlayToolButton}"
+                            ToolTip="Show only subtitles or translations">
+                            <ui:SymbolIcon x:Name="OnlyModeIcon" FontSize="15" Symbol="PanelBottom20" />
+                        </ui:Button>
+                        <ui:Button
+                            x:Name="SwitchModeButton"
+                            Click="SwitchModeButton_Click"
+                            Style="{StaticResource OverlayToolButton}"
+                            ToolTip="Switch the order of subtitles and translations">
+                            <ui:SymbolIcon FontSize="15" Symbol="ArrowSwap20" />
+                        </ui:Button>
+                        <ui:Button
+                            x:Name="ClickThrough"
+                            Click="ClickThrough_Click"
+                            Style="{StaticResource OverlayToolButton}"
+                            ToolTip="Click Through (Ctrl+Alt+T to undo)">
+                            <ui:SymbolIcon x:Name="ClickThroughIcon" FontSize="15" Symbol="LockClosed20" />
+                        </ui:Button>
+                    </StackPanel>
+                </Border>
             </Grid>
         </Border>
 

@@ -8,9 +8,9 @@
     xmlns:ui="http://schemas.lepo.co/wpfui/2022/xaml"
     Title="LiveCaptions Translator"
     Width="750"
-    Height="170"
+    Height="400"
     MinWidth="750"
-    MinHeight="170"
+    MinHeight="210"
     Background="Transparent"
     ExtendsContentIntoTitleBar="True"
     LocationChanged="MainWindow_LocationChanged"
@@ -38,23 +38,6 @@
                 </ui:TitleBar.Header>
                 <ui:TitleBar.TrailingContent>
                     <StackPanel HorizontalAlignment="Right" Orientation="Horizontal">
-                        <ui:Button
-                            x:Name="CaptionLogButton"
-                            Margin="0,0,5,0"
-                            Appearance="Transparent"
-                            Click="CaptionLogButton_Click"
-                            Icon="{ui:SymbolIcon History16,
-                                                 Filled=False}"
-                            ToolTip="Log Cards of Captions"
-                            Visibility="Collapsed" />
-                        <ui:Button
-                            x:Name="LogOnlyButton"
-                            Margin="0,0,5,0"
-                            Appearance="Transparent"
-                            Click="LogOnlyButton_Click"
-                            Icon="{ui:SymbolIcon Pause16,
-                                                 Filled=False}"
-                            ToolTip="Pause Translation (Log Only)" />
                         <ui:Button
                             x:Name="OverlayModeButton"
                             Margin="0,0,5,0"
@@ -86,14 +69,7 @@
                 PaneDisplayMode="LeftMinimal">
                 <ui:NavigationView.MenuItems>
                     <ui:NavigationViewItem
-                        Margin="0,6,0,3"
-                        Content="Caption"
-                        FontFamily="Bahnschrift"
-                        Icon="{ui:SymbolIcon Home24}"
-                        NavigationCacheMode="Enabled"
-                        TargetPageType="{x:Type local:CaptionPage}" />
-                    <ui:NavigationViewItem
-                        Margin="0,3,0,0"
+                        Margin="0,6,0,0"
                         Content="Setting"
                         FontFamily="Bahnschrift"
                         Icon="{ui:SymbolIcon Settings24}"
@@ -104,7 +80,7 @@
                         Content="History"
                         FontFamily="Bahnschrift"
                         Icon="{ui:SymbolIcon History24}"
-                        NavigationCacheMode="Disabled"
+                        NavigationCacheMode="Required"
                         TargetPageType="{x:Type local:HistoryPage}" />
                     <ui:NavigationViewItem
                         Margin="0,3,0,0"
