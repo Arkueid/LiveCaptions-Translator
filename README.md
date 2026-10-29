@@ -25,7 +25,7 @@ Captions live in a transparent overlay that opens with the app; the source line 
   <img src="images/fork_captions.png" alt="Overlay captions: dimmed source line, bright translation" width="80%" />
 </p>
 
-Hovering the overlay fades in a compact toolbar — pause, font size, bold, outline, text color, background opacity and color, what to show, line order, copy-safe click-through:
+The app starts as the overlay alone (the settings window joins it on first launch). Hovering the overlay fades in a compact toolbar — pause, font size, bold, outline, text color, background opacity and color, what to show, line order, copy-safe click-through, and a gear that opens the settings window:
 
 <p align="center">
   <img src="images/fork_toolbar.png" alt="Overlay with hover toolbar" width="80%" />
@@ -41,14 +41,15 @@ Hovering the overlay fades in a compact toolbar — pause, font size, bold, outl
 - **One identity per sentence.** Every finished sentence gets a sequence number; a translation is attached to that number instead of being matched by fuzzy string comparison. This removed the duplicated and swallowed sentence groups of the old display.
 - **Finished sentences go first.** Only one translation request is in flight at a time (local models degrade badly when requests pile up). When a sentence finishes, the speculative translation of the still-growing sentence is cancelled so the model starts on text the reader will actually keep.
 - **One snapshot per frame.** The overlay paints a single immutable snapshot per update, instead of a handful of display properties written one after another from different threads.
-- **All controls live on the overlay.** Pause, font size, bold, outline, text/background colors, opacity, what to show (both / translation only / source only), line order and click-through are in the hover toolbar. `Ctrl+Alt+T` restores input after click-through. Style buttons take effect immediately.
+- **Captions live on the overlay.** It is topmost and stays on screen the whole time; pause, font size, bold, outline, text/background colors, opacity, what to show (both / translation only / source only), line order, click-through and a gear for the settings window are in its hover toolbar. `Ctrl+Alt+T` restores input after click-through. Style buttons take effect immediately.
 - **Latency readout.** With *Show Latency* on, each translation is prefixed with its duration plus the model-side prefill/decode split (e.g. `1420 ms (380+1040)`).
 - **Ollama fixes.** Requests send `temperature` / `num_predict` (the previously sent `max_tokens` was ignored) and thinking is disabled for Qwen 3.5.
 
 ### Removed compared to upstream
 
-- The caption page and Log Cards in the main window — captions are overlay-only now.
-- The pause button in the main window title bar — pause lives on the overlay toolbar.
+- Closing the settings window no longer quits the app — it just hides, and the overlay's gear brings it back. Quit from the power button in either title bar, or by closing the overlay.
+- The caption page and Log Cards — captions are overlay-only now.
+- The pause button in the title bar — pause lives on the overlay toolbar.
 - The parallel/queued translation task queue — a single in-flight request with preemption instead.
 
 ## Building from Source

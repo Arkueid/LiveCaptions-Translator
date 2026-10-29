@@ -39,14 +39,6 @@
                 <ui:TitleBar.TrailingContent>
                     <StackPanel HorizontalAlignment="Right" Orientation="Horizontal">
                         <ui:Button
-                            x:Name="OverlayModeButton"
-                            Margin="0,0,5,0"
-                            Appearance="Transparent"
-                            Click="OverlayModeButton_Click"
-                            Icon="{ui:SymbolIcon ClosedCaptionOff24,
-                                                 Filled=False}"
-                            ToolTip="Overlay Window" />
-                        <ui:Button
                             x:Name="TopmostButton"
                             Margin="0,0,5,0"
                             Appearance="Transparent"
@@ -54,6 +46,14 @@
                             Icon="{ui:SymbolIcon Pin16,
                                                  Filled=True}"
                             ToolTip="Always on Top" />
+                        <ui:Button
+                            x:Name="QuitButton"
+                            Margin="0,0,5,0"
+                            Appearance="Transparent"
+                            Click="QuitButton_Click"
+                            Icon="{ui:SymbolIcon Power20,
+                                                 Filled=False}"
+                            ToolTip="Quit LiveCaptions Translator" />
                     </StackPanel>
                 </ui:TitleBar.TrailingContent>
             </ui:TitleBar>

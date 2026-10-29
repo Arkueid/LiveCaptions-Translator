@@ -76,7 +76,7 @@ namespace LiveCaptionsTranslator
             if (targetHeight < MIN_PAGE_HEIGHT)
                 targetHeight = MIN_PAGE_HEIGHT;
 
-            (App.Current.MainWindow as MainWindow)?.AutoHeightAdjust(
+            App.Settings?.AutoHeightAdjust(
                 minHeight: targetHeight, maxHeight: targetHeight);
         }
 

@@ -9,6 +9,7 @@ using System.Windows.Interop;
 using System.Windows.Media;
 using System.Windows.Media.Animation;
 using System.Windows.Threading;
+using Wpf.Ui.Appearance;
 using Wpf.Ui.Controls;
 
 using LiveCaptionsTranslator.apis;
@@ -44,6 +45,10 @@ namespace LiveCaptionsTranslator
 
         // The translation line is drawn slightly larger than the source line.
         private const double TRANSLATION_FONT_RATIO = 1.25;
+
+        // Window height floor for the caption box (matches the XAML). The box keeps this height even
+        // when it holds nothing but a one-line notice, so the overlay does not jump size at startup.
+        private const double CAPTION_MIN_HEIGHT = 135;
 
         // The `[Paused]` / `[ERROR]` prefix keeps a monospace face so it never looks like part of
         // the translated sentence.
@@ -104,6 +109,33 @@ namespace LiveCaptionsTranslator
             Translator.PauseChanged += SyncPauseButton;
             SyncPauseButton();
             Closed += OnOverlayClosed;
+
+            // This window is Application.Current.MainWindow now, and WPF-UI paints its theme
+            // backdrop on the main window. A backdrop turns the 5 DIP margin around the caption box
+            // into a visible window frame and makes the box itself look opaque, so it is stripped
+            // again after every theme application (the settings window asks for one when it opens).
+            ApplicationThemeManager.Changed += OnApplicationThemeChanged;
+        }
+
+        private void OnApplicationThemeChanged(ApplicationTheme currentApplicationTheme, Color systemAccent)
+        {
+            // Changed is raised before the backdrop is applied, so the cleanup waits for that call.
+            Dispatcher.BeginInvoke(new Action(EnsureTransparentChrome), DispatcherPriority.Background);
+        }
+
+        /// <summary>
+        /// Restores the transparent window background. No-op when nothing was applied; safe to call
+        /// at any time.
+        /// </summary>
+        public void EnsureTransparentChrome()
+        {
+            // Not RemoveBackdrop: that one "restores" the content background by painting the
+            // composition surface with SystemColors.WindowColor — solid white on a light theme —
+            // which then shows through the transparent margins of this window. RemoveBackground is
+            // the variant that actually clears: transparent brush on the window and Colors.Transparent
+            // on its composition target, which is what a layered window needs.
+            WindowBackdrop.RemoveBackground(this);
+            Background = Brushes.Transparent;
         }
 
         private void OnOverlayClosed(object? sender, EventArgs e)
@@ -111,6 +143,7 @@ namespace LiveCaptionsTranslator
             Translator.Caption.PropertyChanged -= Caption_PropertyChanged;
             Translator.Setting.OverlayWindow.PropertyChanged -= OverlaySetting_PropertyChanged;
             Translator.PauseChanged -= SyncPauseButton;
+            ApplicationThemeManager.Changed -= OnApplicationThemeChanged;
 
             WindowsAPI.UnregisterHotKey(new WindowInteropHelper(this).Handle, CLICK_THROUGH_HOTKEY_ID);
             hwndSource?.RemoveHook(WndProc);
@@ -396,6 +429,11 @@ namespace LiveCaptionsTranslator
             // taking space.
             for (int i = pairIndex; i < captionBlocks.Count; i++)
                 captionBlocks[i].Decorator.Visibility = Visibility.Collapsed;
+
+            // The height floor is fixed: an empty or notice-only box stays the same size as a
+            // caption-filled one. It used to shrink to a single line in that state, which made the
+            // overlay start out as a narrow strip and grow on the first caption.
+            MinHeight = CAPTION_MIN_HEIGHT;
         }
 
         private void Border_MouseLeftButtonDown(object sender, MouseButtonEventArgs e)
@@ -508,6 +546,16 @@ namespace LiveCaptionsTranslator
         private void PauseButton_Click(object sender, RoutedEventArgs e)
         {
             Translator.TogglePause();
+        }
+
+        private void SettingsButton_Click(object sender, RoutedEventArgs e)
+        {
+            App.OpenSettings();
+        }
+
+        private void QuitButton_Click(object sender, RoutedEventArgs e)
+        {
+            App.Quit();
         }
 
         // The pause state can also be changed from the main window, so the shape is re-derived
@@ -626,6 +674,19 @@ namespace LiveCaptionsTranslator
         {
             nint hwnd = new WindowInteropHelper(this).Handle;
             int extendedStyle = WindowsAPI.GetWindowLong(hwnd, WindowsAPI.GWL_EXSTYLE);
+
+            // The shortcut is the only way back out of click-through (the window stops receiving
+            // input), so if it cannot be registered the mode is refused instead of being entered
+            // with no exit. The overlay used to be re-creatable from the main window; now it is the
+            // shell, so there is nothing left to rebuild it from.
+            if (enabled && !WindowsAPI.RegisterHotKey(hwnd, CLICK_THROUGH_HOTKEY_ID,
+                    MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, VK_T))
+            {
+                Debug.WriteLine("[OverlayWindow] Ctrl+Alt+T could not be registered; " +
+                                "click-through stays off.");
+                return;
+            }
+
             WindowsAPI.SetWindowLong(hwnd, WindowsAPI.GWL_EXSTYLE,
                 enabled
                     ? extendedStyle | WindowsAPI.WS_EX_TRANSPARENT
@@ -636,21 +697,10 @@ namespace LiveCaptionsTranslator
             // be faded back in; hide them outright until the shortcut turns it off.
             ControlPanel.Visibility = enabled ? Visibility.Collapsed : Visibility.Visible;
             if (!enabled)
-                FadeControlPanel(show: false);
-
-            // Only own the shortcut while click-through is on, so it never clashes with games.
-            if (enabled)
             {
-                bool registered = WindowsAPI.RegisterHotKey(hwnd, CLICK_THROUGH_HOTKEY_ID,
-                    MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, VK_T);
-                if (!registered)
-                {
-                    Debug.WriteLine("[OverlayWindow] Ctrl+Alt+T could not be registered; " +
-                                    "toggle the overlay off/on from the main window instead.");
-                }
-            }
-            else
                 WindowsAPI.UnregisterHotKey(hwnd, CLICK_THROUGH_HOTKEY_ID);
+                FadeControlPanel(show: false);
+            }
 
             ClickThroughIcon.Symbol = enabled ? SymbolRegular.LockClosed16 : SymbolRegular.LockOpen16;
         }

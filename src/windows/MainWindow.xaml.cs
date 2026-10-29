@@ -12,13 +12,11 @@ namespace LiveCaptionsTranslator
 {
     public partial class MainWindow : FluentWindow
     {
-        public OverlayWindow? OverlayWindow { get; set; } = null;
         public bool IsAutoHeight { get; set; } = true;
 
         public MainWindow()
         {
             InitializeComponent();
-            ApplicationThemeManager.ApplySystemTheme();
 
             Loaded += (s, e) =>
             {
@@ -27,9 +25,6 @@ namespace LiveCaptionsTranslator
                 IsAutoHeight = true;
                 CheckForFirstUse();
                 CheckForUpdates();
-
-                // Captions only exist in the overlay now, so it opens with the app.
-                Dispatcher.InvokeAsync(ShowOverlay, System.Windows.Threading.DispatcherPriority.Background);
             };
 
             double screenWidth = SystemParameters.PrimaryScreenWidth;
@@ -53,68 +48,26 @@ namespace LiveCaptionsTranslator
             ToggleTopmost(!this.Topmost);
         }
 
-        private void OverlayModeButton_Click(object sender, RoutedEventArgs e)
+        private void QuitButton_Click(object sender, RoutedEventArgs e)
         {
-            var button = sender as Button;
-            var symbolIcon = button?.Icon as SymbolIcon;
-
-            if (OverlayWindow == null)
-                ShowOverlay();
-            else
-            {
-                symbolIcon.Symbol = SymbolRegular.ClosedCaptionOff24;
-                symbolIcon.Filled = false;
-
-                switch (OverlayWindow.OnlyMode)
-                {
-                    case CaptionVisible.TranslationOnly:
-                        OverlayWindow.OnlyMode = CaptionVisible.SubtitleOnly;
-                        OverlayWindow.OnlyMode = CaptionVisible.Both;
-                        break;
-                    case CaptionVisible.SubtitleOnly:
-                        OverlayWindow.OnlyMode = CaptionVisible.Both;
-                        break;
-                }
-
-                OverlayWindow.Close();
-                OverlayWindow = null;
-            }
+            App.Quit();
         }
 
-        // The overlay is the only place captions are rendered now, so it is opened together with
-        // the main window: launching the app and seeing nothing would look broken.
-        private void ShowOverlay()
+        // This window is a companion to the overlay, not the app itself: captions keep running when
+        // it is dismissed, so closing just hides it and the overlay toolbar brings it back. Quitting
+        // goes through the power button above, or by closing the overlay itself.
+        protected override void OnClosing(System.ComponentModel.CancelEventArgs e)
         {
-            if (OverlayWindow != null)
+            if (!App.IsQuitting)
+            {
+                e.Cancel = true;
+                Hide();
+                // The overlay is topmost and stepped aside for the settings window; take it back.
+                App.RestoreOverlayTopmost();
                 return;
-
-            if (OverlayModeButton.Icon is SymbolIcon icon)
-            {
-                icon.Symbol = SymbolRegular.ClosedCaption24;
-                icon.Filled = true;
             }
 
-            OverlayWindow = new OverlayWindow();
-            OverlayWindow.SizeChanged +=
-                (s, e) => WindowHandler.SaveState(OverlayWindow, Translator.Setting);
-            OverlayWindow.LocationChanged +=
-                (s, e) => WindowHandler.SaveState(OverlayWindow, Translator.Setting);
-            OverlayWindow.Closed += (s, e) => OverlayWindow = null;
-
-            double screenWidth = SystemParameters.PrimaryScreenWidth;
-            double screenHeight = SystemParameters.PrimaryScreenHeight;
-
-            var windowState = WindowHandler.LoadState(OverlayWindow, Translator.Setting);
-            if (windowState.Left <= 0 || windowState.Left >= screenWidth ||
-                windowState.Top <= 0 || windowState.Top >= screenHeight)
-            {
-                WindowHandler.RestoreState(OverlayWindow, new Rect(
-                    (screenWidth - 650) / 2, screenHeight * 5 / 6 - 135, 650, 135));
-            }
-            else
-                WindowHandler.RestoreState(OverlayWindow, windowState);
-
-            OverlayWindow.Show();
+            base.OnClosing(e);
         }
 
         private void MainWindow_LocationChanged(object sender, EventArgs e)

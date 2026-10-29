@@ -5,11 +5,21 @@ namespace LiveCaptionsTranslator
     class SnackbarHost
     {
         public static Snackbar? mainSnackbar;
-        public static MainWindow? mainWindow = (MainWindow)App.Current.MainWindow;
+        public static MainWindow? mainWindow => App.Settings;
 
         public static void Show(string title = "", string message = "", SnackbarType type = SnackbarType.Info,
                                 int width = 500, int timeout = 1, bool closeButton = false)
         {
+            // The snackbar lives on the settings window, which no longer exists at startup. Reports
+            // that happen before it is first opened (a failed history write, for instance) are only
+            // logged, since there is nothing on screen to attach them to.
+            var window = mainWindow;
+            if (window == null)
+            {
+                System.Diagnostics.Debug.WriteLine($"[SnackbarHost] {title} {message}");
+                return;
+            }
+
             ControlAppearance appearance;
             SymbolIcon icon;
             Snackbar? snackbar;
@@ -34,7 +44,7 @@ namespace LiveCaptionsTranslator
                     break;
             }
 
-            mainSnackbar ??= new Snackbar(mainWindow?.snackbarHost);
+            mainSnackbar ??= new Snackbar(window.snackbarHost);
             snackbar = mainSnackbar;
 
             snackbar.SetCurrentValue(Snackbar.TitleProperty, title);

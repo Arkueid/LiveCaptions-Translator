@@ -44,15 +44,15 @@ namespace LiveCaptionsTranslator
         {
             InitializeComponent();
 
-            // The application theme is already applied once at startup (MainWindow), so re-applying it
-            // per navigation only cost time: ~12 ms on the first visit for no visible change.
+            // The application theme is applied once at startup, so re-applying it per navigation only cost
+            // time: ~12 ms on the first visit for no visible change.
             HistoryDataGrid.ItemsSource = historyItems;
 
             Loaded += async (s, e) =>
             {
                 // Resize before the data arrives. The page used to load first and grow the window
                 // afterwards, which read as "it is slow" even though the query itself is ~2 ms.
-                (App.Current.MainWindow as MainWindow)?.AutoHeightAdjust(
+                App.Settings?.AutoHeightAdjust(
                     minHeight: MIN_HEIGHT, maxHeight: MIN_HEIGHT);
 
                 await LoadHistory();
@@ -121,7 +121,7 @@ namespace LiveCaptionsTranslator
 
         private async void Delete_click(object sender, RoutedEventArgs e)
         {
-            var dialogHostContainer = (Application.Current.MainWindow as MainWindow)?.DialogHostContainer;
+            var dialogHostContainer = App.Settings?.DialogHostContainer;
 
             var dialog = new ContentDialog
             {

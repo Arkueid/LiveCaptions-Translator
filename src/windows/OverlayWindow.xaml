@@ -197,6 +197,23 @@
                             ToolTip="Click Through (Ctrl+Alt+T to undo)">
                             <ui:SymbolIcon x:Name="ClickThroughIcon" FontSize="15" Symbol="LockClosed20" />
                         </ui:Button>
+                        <Rectangle Style="{StaticResource OverlayToolSeparator}" />
+
+                        <!-- The app opens with this window alone; the settings window is summoned here. -->
+                        <ui:Button
+                            x:Name="SettingsButton"
+                            Click="SettingsButton_Click"
+                            Style="{StaticResource OverlayToolButton}"
+                            ToolTip="Settings">
+                            <ui:SymbolIcon FontSize="15" Symbol="Settings20" />
+                        </ui:Button>
+                        <ui:Button
+                            x:Name="QuitButton"
+                            Click="QuitButton_Click"
+                            Style="{StaticResource OverlayToolButton}"
+                            ToolTip="Quit">
+                            <ui:SymbolIcon FontSize="15" Symbol="Power20" />
+                        </ui:Button>
                     </StackPanel>
                 </Border>
             </Grid>
